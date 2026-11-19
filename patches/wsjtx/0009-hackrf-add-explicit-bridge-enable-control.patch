@@ -1,0 +1,173 @@
+--- a/HackRFGainDialog.cpp
++++ b/HackRFGainDialog.cpp
+@@ -2,9 +2,12 @@
+ 
+ #include <QCheckBox>
+ #include <QDialogButtonBox>
++#include <QDir>
+ #include <QElapsedTimer>
+ #include <QFile>
+ #include <QFileInfo>
++#include <QMessageBox>
++#include <QStandardPaths>
+ #include <QGridLayout>
+ #include <QGroupBox>
+ #include <QLabel>
+@@ -114,7 +117,19 @@
+ 
+   if (!have_saved)
+     {
+-      return true;
++      settings->setValue (
++        QStringLiteral ("HackRF/LNA"), 0);
++
++      settings->setValue (
++        QStringLiteral ("HackRF/VGA"), 0);
++
++      settings->setValue (
++        QStringLiteral ("HackRF/AMP"), false);
++
++      settings->setValue (
++        QStringLiteral ("HackRF/TXVGA"), 0);
++
++      settings->sync ();
+     }
+ 
+   auto command =
+@@ -437,6 +452,97 @@
+ 
+ 
+   //
++  // Bridge startup
++  //
++  QString const bridge_config_dir =
++    QStandardPaths::writableLocation (
++      QStandardPaths::ConfigLocation)
++    + QStringLiteral ("/wsjtx-hackrf");
++
++  QString const bridge_enable_file =
++    bridge_config_dir
++    + QStringLiteral ("/bridge-enabled");
++
++  auto * bridge_enable_check =
++    new QCheckBox {
++      tr ("Enable HackRF bridge on next startup"),
++      this};
++
++  bridge_enable_check->setChecked (
++    QFileInfo::exists (bridge_enable_file));
++
++  connect (
++    bridge_enable_check,
++    &QCheckBox::toggled,
++    this,
++    [this,
++     bridge_enable_check,
++     bridge_config_dir,
++     bridge_enable_file] (bool enabled)
++    {
++      bool success {false};
++
++      if (enabled)
++        {
++          QDir dir;
++
++          if (dir.mkpath (bridge_config_dir))
++            {
++              QFile file {bridge_enable_file};
++
++              success =
++                file.open (
++                  QIODevice::WriteOnly
++                  | QIODevice::Truncate);
++
++              if (success)
++                {
++                  file.write ("1\n");
++                  file.close ();
++                }
++            }
++        }
++      else
++        {
++          success =
++            !QFileInfo::exists (bridge_enable_file)
++            || QFile::remove (bridge_enable_file);
++        }
++
++      if (!success)
++        {
++          QSignalBlocker blocker {
++            bridge_enable_check};
++
++          bridge_enable_check->setChecked (
++            !enabled);
++
++          QMessageBox::warning (
++            this,
++            tr ("HackRF bridge"),
++            tr ("Unable to change the HackRF bridge "
++                "startup setting."));
++
++          return;
++        }
++
++      QMessageBox::information (
++        this,
++        tr ("HackRF bridge"),
++        enabled
++          ? tr ("The HackRF bridge will be enabled "
++                "the next time WSJT-X is started.\n\n"
++                "To use it, configure:\n"
++                "Settings -> Radio\n"
++                "Rig: Hamlib NET rigctl\n"
++                "Network Server: 127.0.0.1:4532\n\n"
++                "Restart WSJT-X after applying these settings.")
++          : tr ("The HackRF bridge will remain disabled "
++                "the next time WSJT-X is started."));
++    });
++
++
++  //
+   // Close
+   //
+   auto * buttons =
+@@ -532,6 +638,8 @@
+   main_layout->addWidget (tx_group);
+   main_layout->addWidget (diag_group);
+ 
++  main_layout->addWidget (bridge_enable_check);
++
+   main_layout->addWidget (frequency_label_);
+   main_layout->addWidget (bridge_status_label_);
+ 
+@@ -712,24 +820,21 @@
+ 
+   //
+   // Primera ejecución:
+-  // adoptar como configuración persistente el estado actual del bridge.
++  // comenzar siempre desde una condición conservadora.
+   //
+   if (!have_saved)
+     {
+       saveGain (
+-        QStringLiteral ("LNA"), lna);
++        QStringLiteral ("LNA"), 0);
+ 
+       saveGain (
+-        QStringLiteral ("VGA"), vga);
++        QStringLiteral ("VGA"), 0);
+ 
+       saveGain (
+-        QStringLiteral ("AMP"), amp);
++        QStringLiteral ("AMP"), false);
+ 
+       saveGain (
+-        QStringLiteral ("TXVGA"), tx_vga);
+-
+-      gains_restored_ = true;
+-      return;
++        QStringLiteral ("TXVGA"), 0);
+     }
+ 
+   int const saved_lna =

@@ -1,0 +1,52 @@
+WSJTX-HackRF
+============
+
+WSJTX-HackRF is an independent community project and is not an official
+release of WSJT-X.
+
+This repository contains original bridge, build, launcher and documentation
+code together with patches intended to be applied to WSJT-X.
+
+WSJT-X
+------
+WSJT-X is Copyright (C) 2001-2026 by Joseph Taylor, K1JT, and the
+WSJT Development Team.
+
+WSJT-X is licensed under the GNU General Public License, version 3.
+
+Official project:
+https://wsjtx.github.io/wsjtx/
+
+The algorithms, source code, look-and-feel of WSJT-X and related programs,
+and protocol specifications for its digital modes remain the intellectual
+property of their respective WSJT-X authors.
+
+Hamlib
+------
+Hamlib is an independent upstream project.
+
+The Hamlib library is distributed under the GNU Lesser General Public
+License version 2.1, while Hamlib utility programs are distributed under
+the GNU General Public License version 2.
+
+WSJTX-HackRF downloads and builds a private copy of Hamlib. Hamlib is not
+relicensed by this project.
+
+HackRF / libhackrf
+------------------
+HackRF is an independent project by Great Scott Gadgets and contributors.
+
+The upstream HackRF project is distributed under the GNU General Public
+License version 2.
+
+WSJTX-HackRF downloads and builds a private copy of libhackrf. HackRF is
+not relicensed by this project.
+
+WSJTX-HackRF original code
+--------------------------
+Unless otherwise noted, original source code, scripts, documentation and
+patches authored specifically for WSJTX-HackRF are distributed under the
+GNU General Public License version 3.
+
+This project is provided WITHOUT ANY WARRANTY; without even the implied
+warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.

@@ -1,0 +1,894 @@
+From a454462613f53cb95c3d91ba748a0252e83a7487 Mon Sep 17 00:00:00 2001
+From: Ricardo Jose <ricardo@localhost>
+Date: Mon, 16 Nov 2026 21:12:47 +0000
+Subject: [PATCH 6/8] log: add REG1TEST EDI export core
+
+---
+ models/CabrilloLog.cpp | 801 +++++++++++++++++++++++++++++++++++++++++
+ models/CabrilloLog.hpp |  37 ++
+ 2 files changed, 838 insertions(+)
+
+diff --git a/models/CabrilloLog.cpp b/models/CabrilloLog.cpp
+index 77166859e..ec657ffb6 100644
+--- a/models/CabrilloLog.cpp
++++ b/models/CabrilloLog.cpp
+@@ -2,6 +2,10 @@
+ 
+ #include <stdexcept>
+ #include <utility>
++#include <cmath>
++#include <QRegularExpression>
++#include <QStringList>
++#include <QVector>
+ #include <QString>
+ #include <QDateTime>
+ #include <QSqlDatabase>
+@@ -288,6 +292,331 @@ void CabrilloLog::reset ()
+     }
+ }
+ 
++
++namespace
++{
++  struct EDIExchange
++  {
++    QString rst;
++    QString serial;
++    QString exchange;
++    QString locator;
++  };
++
++
++  bool edi_locator_valid (QString const& value)
++  {
++    static QRegularExpression const re {
++      QStringLiteral (
++        "^[A-Ra-r]{2}[0-9]{2}([A-Xa-x]{2})?$")
++    };
++
++    return re.match (value).hasMatch ();
++  }
++
++
++  EDIExchange parse_edi_exchange (QString const& text)
++  {
++    EDIExchange result;
++
++    auto tokens =
++      text.trimmed ().split (
++        ' ',
++        SkipEmptyParts);
++
++    if (tokens.isEmpty ())
++      {
++        return result;
++      }
++
++    //
++    // Formato clásico VHF:
++    //   59003 JO20DB
++    //   579123 IN55CC
++    //
++    // MGM:
++    //   -10 IO91
++    //   IO91
++    //
++    auto first = tokens.front ().trimmed ();
++
++    static QRegularExpression const combined {
++      QStringLiteral ("^[0-9]{5,7}$")
++    };
++
++    static QRegularExpression const report {
++      QStringLiteral ("^[+-]?[0-9]{2,3}$")
++    };
++
++    if (combined.match (first).hasMatch ())
++      {
++        if (first.size () == 5)
++          {
++            result.rst = first.left (2);
++            result.serial = first.mid (2);
++          }
++        else
++          {
++            result.rst = first.left (3);
++            result.serial = first.mid (3);
++          }
++
++        tokens.removeFirst ();
++      }
++    else if (report.match (first).hasMatch ())
++      {
++        result.rst = first;
++        tokens.removeFirst ();
++      }
++
++    QStringList remainder;
++
++    for (auto const& token : tokens)
++      {
++        auto value = token.trimmed ();
++
++        if (result.locator.isEmpty ()
++            && edi_locator_valid (value))
++          {
++            result.locator =
++              value.toUpper ();
++            continue;
++          }
++
++        if (result.serial.isEmpty ())
++          {
++            bool numeric {false};
++            value.toUInt (&numeric);
++
++            if (numeric
++                && (value.size () == 3
++                    || value.size () == 4))
++              {
++                result.serial = value;
++                continue;
++              }
++          }
++
++        remainder << value;
++      }
++
++    //
++    // EDI permite Exchange de hasta 6 caracteres.
++    // No concatenamos ni truncamos datos para "hacerlos caber".
++    //
++    if (remainder.size () == 1
++        && remainder.front ().size () <= 6)
++      {
++        result.exchange =
++          remainder.front ().toUpper ();
++      }
++
++    return result;
++  }
++
++
++  struct EDILocation
++  {
++    double latitude;
++    double longitude;
++  };
++
++
++  bool edi_locator_center (
++    QString locator,
++    EDILocation * result)
++  {
++    locator =
++      locator.trimmed ().toUpper ();
++
++    if (!result
++        || !edi_locator_valid (locator))
++      {
++        return false;
++      }
++
++    double lon =
++      (locator.at (0).unicode () - 'A') * 20.0
++      - 180.0;
++
++    double lat =
++      (locator.at (1).unicode () - 'A') * 10.0
++      - 90.0;
++
++    lon +=
++      locator.at (2).digitValue () * 2.0;
++
++    lat +=
++      locator.at (3).digitValue ();
++
++    if (locator.size () == 4)
++      {
++        //
++        // Centro del square de 2 x 1 grados.
++        //
++        lon += 1.0;
++        lat += 0.5;
++      }
++    else
++      {
++        lon +=
++          (locator.at (4).unicode () - 'A')
++          * (5.0 / 60.0);
++
++        lat +=
++          (locator.at (5).unicode () - 'A')
++          * (2.5 / 60.0);
++
++        //
++        // Centro del subsquare.
++        //
++        lon += 2.5 / 60.0;
++        lat += 1.25 / 60.0;
++      }
++
++    result->latitude = lat;
++    result->longitude = lon;
++    return true;
++  }
++
++
++  int edi_distance_points (
++    QString const& own_locator,
++    QString const& remote_locator)
++  {
++    EDILocation a {};
++    EDILocation b {};
++
++    if (!edi_locator_center (own_locator, &a)
++        || !edi_locator_center (remote_locator, &b))
++      {
++        return 0;
++      }
++
++    constexpr double pi =
++      3.14159265358979323846;
++
++    auto radians =
++      [pi] (double degrees)
++      {
++        return degrees * pi / 180.0;
++      };
++
++    double const lat1 = radians (a.latitude);
++    double const lat2 = radians (b.latitude);
++
++    double const delta_lon =
++      radians (b.longitude - a.longitude);
++
++    double cosine =
++      std::sin (lat1) * std::sin (lat2)
++      + std::cos (lat1) * std::cos (lat2)
++      * std::cos (delta_lon);
++
++    if (cosine > 1.0)
++      cosine = 1.0;
++    else if (cosine < -1.0)
++      cosine = -1.0;
++
++    double const central_angle_deg =
++      std::acos (cosine) * 180.0 / pi;
++
++    //
++    // IARU R1: 111.2 km/grado,
++    // truncar distancia y sumar 1 km.
++    //
++    return
++      static_cast<int> (
++        std::floor (
++          central_angle_deg * 111.2))
++      + 1;
++  }
++
++
++  QString edi_band_name (
++    QString const& wsjt_band)
++  {
++    if (wsjt_band == "6m")
++      return QStringLiteral ("50 MHz");
++
++    if (wsjt_band == "4m")
++      return QStringLiteral ("70 MHz");
++
++    if (wsjt_band == "2m")
++      return QStringLiteral ("145 MHz");
++
++    if (wsjt_band == "70cm")
++      return QStringLiteral ("435 MHz");
++
++    if (wsjt_band == "23cm")
++      return QStringLiteral ("1,3 GHz");
++
++    if (wsjt_band == "13cm")
++      return QStringLiteral ("2,3 GHz");
++
++    if (wsjt_band == "9cm")
++      return QStringLiteral ("3,4 GHz");
++
++    if (wsjt_band == "6cm")
++      return QStringLiteral ("5,7 GHz");
++
++    if (wsjt_band == "3cm")
++      return QStringLiteral ("10 GHz");
++
++    if (wsjt_band == "1.25cm")
++      return QStringLiteral ("24 GHz");
++
++    if (wsjt_band == "6mm")
++      return QStringLiteral ("47 GHz");
++
++    if (wsjt_band == "4mm")
++      return QStringLiteral ("76 GHz");
++
++    if (wsjt_band == "2.5mm")
++      return QStringLiteral ("120 GHz");
++
++    if (wsjt_band == "2mm")
++      return QStringLiteral ("144 GHz");
++
++    if (wsjt_band == "1mm")
++      return QStringLiteral ("248 GHz");
++
++    return {};
++  }
++
++
++  int edi_band_multiplier (
++    QString const& wsjt_band)
++  {
++    if (wsjt_band == "6mm")
++      return 2;
++
++    if (wsjt_band == "4mm")
++      return 3;
++
++    if (wsjt_band == "2.5mm")
++      return 4;
++
++    if (wsjt_band == "2mm")
++      return 8;
++
++    if (wsjt_band == "1mm")
++      return 10;
++
++    return 1;
++  }
++
++
++  QString edi_clean_header (
++    QString value)
++  {
++    value.replace ('\r', ' ');
++    value.replace ('\n', ' ');
++    return value.trimmed ();
++  }
++}
++
++
+ void CabrilloLog::export_qsos (QTextStream& stream) const
+ {
+   SQL_error_check (m_->export_query_, static_cast<bool (QSqlQuery::*) ()> (&QSqlQuery::exec));
+@@ -311,6 +640,478 @@ void CabrilloLog::export_qsos (QTextStream& stream) const
+     }
+ }
+ 
++
++bool CabrilloLog::export_edi (
++  QTextStream& stream,
++  EDIExportOptions const& options,
++  QString * error) const
++{
++  auto fail =
++    [error] (QString const& message)
++    {
++      if (error)
++        {
++          *error = message;
++        }
++
++      return false;
++    };
++
++  if (options.contest_name.trimmed ().isEmpty ())
++    return fail (
++      tr ("EDI contest name is empty"));
++
++  if (options.callsign.trimmed ().isEmpty ())
++    return fail (
++      tr ("EDI callsign is empty"));
++
++  if (!edi_locator_valid (options.locator))
++    return fail (
++      tr ("EDI station locator must contain "
++          "4 or 6 Maidenhead characters"));
++
++  if (options.section.trimmed ().isEmpty ())
++    return fail (
++      tr ("EDI section is empty"));
++
++  auto const pband =
++    edi_band_name (options.band);
++
++  if (pband.isEmpty ())
++    return fail (
++      tr ("Band \"%1\" has no REG1TEST PBand mapping")
++        .arg (options.band));
++
++  //
++  // IARU R1 current minimum contest header information.
++  //
++  if (options.responsible_call.trimmed ().isEmpty ())
++    return fail (
++      tr ("EDI responsible operator callsign is empty"));
++
++  if (options.email.trimmed ().isEmpty ())
++    return fail (
++      tr ("EDI responsible operator e-mail is empty"));
++
++  if (options.tx_power.trimmed ().isEmpty ())
++    return fail (
++      tr ("EDI TX power is empty"));
++
++  if (options.antenna.trimmed ().isEmpty ())
++    return fail (
++      tr ("EDI antenna description is empty"));
++
++
++  QSqlQuery query;
++
++  SQL_error_check (
++    query,
++    static_cast<bool (QSqlQuery::*) (QString const&)>
++      (&QSqlQuery::exec),
++    "SELECT "
++    "frequency, "
++    "\"when\", "
++    "call, "
++    "exchange_sent, "
++    "exchange_rcvd "
++    "FROM cabrillo_log_v2 "
++    "ORDER BY \"when\"");
++
++
++  struct EDIRecord
++  {
++    QString line;
++    QDate date;
++    QString call;
++    QString locator;
++    QString exchange;
++    int points;
++    bool duplicate;
++  };
++
++  QVector<EDIRecord> records;
++
++  QSet<QString> worked_calls;
++  QSet<QString> worked_large_wwl;
++  QSet<QString> worked_exchange;
++
++  int total_points {0};
++  int valid_qsos {0};
++
++  QString odx_call;
++  QString odx_locator;
++  int odx_distance {0};
++
++  auto const own_locator =
++    options.locator.trimmed ().toUpper ();
++
++  int const band_multiplier =
++    edi_band_multiplier (options.band);
++
++
++  while (query.next ())
++    {
++      auto const frequency =
++        query.value (0)
++          .value<Radio::Frequency> ();
++
++      auto const band =
++        m_->configuration_->bands ()->find (
++          frequency);
++
++      //
++      // REG1TEST se entrega por banda.
++      //
++      if (band != options.band)
++        {
++          continue;
++        }
++
++      auto const when =
++        QDateTime::fromMSecsSinceEpoch (
++          query.value (1).toULongLong ()
++          * 1000ull,
++          Qt::UTC);
++
++      auto const call =
++        query.value (2)
++          .toString ()
++          .trimmed ()
++          .toUpper ();
++
++      auto const sent =
++        parse_edi_exchange (
++          query.value (3).toString ());
++
++      auto const received =
++        parse_edi_exchange (
++          query.value (4).toString ());
++
++      if (call.size () < 3
++          || call.size () > 14)
++        {
++          return fail (
++            tr ("Callsign \"%1\" cannot be represented "
++                "in a REG1TEST QSO record")
++              .arg (call));
++        }
++
++      bool const duplicate =
++        worked_calls.contains (call);
++
++      worked_calls.insert (call);
++
++      int distance {0};
++      int points {0};
++
++      if (!received.locator.isEmpty ())
++        {
++          distance =
++            edi_distance_points (
++              own_locator,
++              received.locator);
++        }
++
++      if (!duplicate)
++        {
++          points = distance;
++
++          //
++          // Regla MGM 50/70 MHz:
++          // dentro del mismo Large Locator, 50 puntos.
++          //
++          if ((options.band == "6m"
++               || options.band == "4m")
++              && !received.locator.isEmpty ()
++              && own_locator.left (4)
++                   == received.locator.left (4))
++            {
++              points = 50;
++            }
++
++          points *= band_multiplier;
++          ++valid_qsos;
++        }
++      else
++        {
++          points = 0;
++        }
++
++      QString new_exchange;
++
++      if (!received.exchange.isEmpty ()
++          && !worked_exchange.contains (
++            received.exchange))
++        {
++          new_exchange =
++            QStringLiteral ("N");
++
++          worked_exchange.insert (
++            received.exchange);
++        }
++
++      QString new_wwl;
++
++      QString const large_wwl =
++        received.locator.left (4);
++
++      if (large_wwl.size () == 4
++          && !worked_large_wwl.contains (
++            large_wwl))
++        {
++          new_wwl =
++            QStringLiteral ("N");
++
++          worked_large_wwl.insert (
++            large_wwl);
++        }
++
++
++      QStringList fields;
++
++      fields
++        << when.date ().toString ("yyMMdd")
++        << when.time ().toString ("hhmm")
++        << call
++        << QStringLiteral ("7")
++        << sent.rst
++        << sent.serial
++        << received.rst
++        << received.serial
++        << received.exchange
++        << received.locator
++        << QString::number (points)
++        << new_exchange
++        << new_wwl
++        << QString {}
++        << (duplicate
++              ? QStringLiteral ("D")
++              : QString {});
++
++      auto const line =
++        fields.join (';');
++
++      if (line.size () > 75)
++        {
++          return fail (
++            tr ("REG1TEST QSO record exceeds "
++                "75 characters:\n%1")
++              .arg (line));
++        }
++
++      records.push_back (
++        {
++          line,
++          when.date (),
++          call,
++          received.locator,
++          received.exchange,
++          points,
++          duplicate
++        });
++
++      total_points += points;
++
++      if (!duplicate
++          && distance > odx_distance)
++        {
++          odx_distance = distance;
++          odx_call = call;
++          odx_locator =
++            received.locator;
++        }
++    }
++
++
++  if (records.isEmpty ())
++    {
++      return fail (
++        tr ("There are no Cabrillo-log QSOs "
++            "for band %1")
++          .arg (options.band));
++    }
++
++
++  auto const first_date =
++    records.front ().date;
++
++  auto const last_date =
++    records.back ().date;
++
++  int claimed_score =
++    total_points;
++
++  if (options.score_mode
++      == EDIScoreMode::IaruRegion1LocatorMultiplier)
++    {
++      claimed_score =
++        total_points
++        * worked_large_wwl.size ();
++    }
++
++
++  auto line =
++    [&stream] (QString const& value)
++    {
++      stream << value << "\r\n";
++    };
++
++
++  line ("[REG1TEST;1]");
++
++  line (
++    "TName="
++    + edi_clean_header (
++      options.contest_name));
++
++  line (
++    QStringLiteral ("TDate=%1;%2")
++      .arg (
++        first_date.toString ("yyyyMMdd"),
++        last_date.toString ("yyyyMMdd")));
++
++  line (
++    "PCall="
++    + edi_clean_header (
++      options.callsign.toUpper ()));
++
++  line (
++    "PWWLo="
++    + own_locator.left (6));
++
++  line (
++    "PExch="
++    + edi_clean_header (
++      options.exchange));
++
++  line ("PAdr1=");
++  line ("PAdr2=");
++
++  line (
++    "PSect="
++    + edi_clean_header (
++      options.section));
++
++  line (
++    "PBand="
++    + pband);
++
++  line (
++    "PClub="
++    + edi_clean_header (
++      options.club));
++
++  line ("RName=");
++
++  line (
++    "RCall="
++    + edi_clean_header (
++      options.responsible_call.toUpper ()));
++
++  line ("RAdr1=");
++  line ("RAdr2=");
++  line ("RPoCo=");
++  line ("RCity=");
++  line ("RCoun=");
++  line ("RPhon=");
++
++  line (
++    "RHBBS="
++    + edi_clean_header (
++      options.email));
++
++  line (
++    "MOpe1="
++    + edi_clean_header (
++      options.operators));
++
++  line ("MOpe2=");
++  line ("STXEq=");
++
++  line (
++    "SPowe="
++    + edi_clean_header (
++      options.tx_power));
++
++  line ("SRXEq=");
++
++  line (
++    "SAnte="
++    + edi_clean_header (
++      options.antenna));
++
++  line ("SAntH=");
++
++  line (
++    QStringLiteral ("CQSOs=%1;1")
++      .arg (valid_qsos));
++
++  line (
++    QStringLiteral ("CQSOP=%1")
++      .arg (total_points));
++
++  line (
++    QStringLiteral ("CWWLs=%1;0;1")
++      .arg (worked_large_wwl.size ()));
++
++  line ("CWWLB=0");
++
++  line (
++    QStringLiteral ("CExcs=%1;0;1")
++      .arg (worked_exchange.size ()));
++
++  line ("CExcB=0");
++  line ("CDXCs=0;0;1");
++  line ("CDXCB=0");
++
++  //
++  // La fórmula de puntuación no pertenece al formato
++  // REG1TEST sino a las reglas del concurso.
++  //
++  line (
++    QStringLiteral ("CToSc=%1")
++      .arg (claimed_score));
++
++  if (!odx_call.isEmpty ())
++    {
++      line (
++        QStringLiteral ("CODXC=%1;%2;%3")
++          .arg (
++            odx_call,
++            odx_locator,
++            QString::number (
++              odx_distance)));
++    }
++  else
++    {
++      line ("CODXC=");
++    }
++
++  line ("[Remarks]");
++
++  if (!options.remarks.trimmed ().isEmpty ())
++    {
++      auto const remarks =
++        edi_clean_header (
++          options.remarks);
++
++      line (remarks.left (75));
++    }
++
++  line (
++    QStringLiteral ("[QSORecords;%1]")
++      .arg (records.size ()));
++
++
++  for (auto const& record : records)
++    {
++      line (record.line);
++    }
++
++  return true;
++}
++
++
+ auto CabrilloLog::unique_DXCC_entities (AD1CCty const * countries) const -> worked_set
+ {
+   QSqlQuery q {"SELECT DISTINCT BAND, CALL FROM cabrillo_log_v2"};
+diff --git a/models/CabrilloLog.hpp b/models/CabrilloLog.hpp
+index 68b76fc2a..742c4594a 100644
+--- a/models/CabrilloLog.hpp
++++ b/models/CabrilloLog.hpp
+@@ -24,6 +24,37 @@ public:
+   using worked_item = QPair<QString, QString>;
+   using worked_set = QSet<worked_item>;
+ 
++  enum class EDIScoreMode
++  {
++    QsoPointsOnly,
++    IaruRegion1LocatorMultiplier
++  };
++
++  struct EDIExportOptions
++  {
++    EDIScoreMode score_mode {
++      EDIScoreMode::QsoPointsOnly
++    };
++
++    QString contest_name;
++    QString band;
++    QString section;
++
++    QString callsign;
++    QString locator;
++    QString exchange;
++
++    QString responsible_call;
++    QString email;
++
++    QString tx_power;
++    QString antenna;
++
++    QString club;
++    QString operators;
++    QString remarks;
++  };
++
+   explicit CabrilloLog (Configuration const *, QObject * parent = nullptr);
+   ~CabrilloLog ();
+ 
+@@ -36,6 +67,12 @@ public:
+   QSqlTableModel * model ();
+   void reset ();
+   void export_qsos (QTextStream&) const;
++
++  bool export_edi (
++    QTextStream&,
++    EDIExportOptions const&,
++    QString * error = nullptr) const;
++
+   worked_set unique_DXCC_entities (AD1CCty const *) const;
+ 
+   Q_SIGNAL void data_changed () const;
+-- 
+2.34.1
+

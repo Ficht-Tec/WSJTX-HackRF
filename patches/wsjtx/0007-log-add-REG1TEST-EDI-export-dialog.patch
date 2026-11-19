@@ -1,0 +1,659 @@
+From 9f9233910da7db5da0d4957fd6ad371ba6191aea Mon Sep 17 00:00:00 2001
+From: Ricardo Jose <ricardo@localhost>
+Date: Mon, 16 Nov 2026 23:06:46 +0000
+Subject: [PATCH 7/8] log: add REG1TEST EDI export dialog
+
+---
+ CMakeLists.txt         |   1 +
+ widgets/ExportEDI.cpp  | 491 +++++++++++++++++++++++++++++++++++++++++
+ widgets/ExportEDI.hpp  |  55 +++++
+ widgets/mainwindow.cpp |  13 ++
+ widgets/mainwindow.h   |   1 +
+ widgets/mainwindow.ui  |   9 +
+ 6 files changed, 570 insertions(+)
+ create mode 100644 widgets/ExportEDI.cpp
+ create mode 100644 widgets/ExportEDI.hpp
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index f339ccbd5..2610094d6 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -346,6 +346,7 @@ set (wsjtx_CXXSRCS
+   Network/wsprnet.cpp
+   WSPR/WSPRBandHopping.cpp
+   widgets/ExportCabrillo.cpp
++widgets/ExportEDI.cpp
+   widgets/QSYMessage.cpp 
+   widgets/QSYMessageCreator.cpp
+   widgets/qsymonitor.cpp
+diff --git a/widgets/ExportEDI.cpp b/widgets/ExportEDI.cpp
+new file mode 100644
+index 000000000..4fe9e82e0
+--- /dev/null
++++ b/widgets/ExportEDI.cpp
+@@ -0,0 +1,491 @@
++#include "ExportEDI.hpp"
++
++#include <QApplication>
++#include <QComboBox>
++#include <QDialogButtonBox>
++#include <QFile>
++#include <QFileDialog>
++#include <QFormLayout>
++#include <QLabel>
++#include <QLineEdit>
++#include <QPushButton>
++#include <QSettings>
++#include <QTextStream>
++#include <QVBoxLayout>
++
++#include "Configuration.hpp"
++#include "MessageBox.hpp"
++#include "SettingsGroup.hpp"
++#include "models/CabrilloLog.hpp"
++
++#include "moc_ExportEDI.cpp"
++
++
++ExportEDI::ExportEDI (
++  QSettings * settings,
++  Configuration const * configuration,
++  CabrilloLog const * log,
++  QWidget * parent)
++  : QDialog {parent}
++  , settings_ {settings}
++  , configuration_ {configuration}
++  , log_ {log}
++  , contest_ {new QLineEdit {this}}
++  , band_ {new QComboBox {this}}
++  , section_ {new QLineEdit {this}}
++  , callsign_ {new QLineEdit {this}}
++  , locator_ {new QLineEdit {this}}
++  , exchange_ {new QLineEdit {this}}
++  , responsible_call_ {new QLineEdit {this}}
++  , email_ {new QLineEdit {this}}
++  , tx_power_ {new QLineEdit {this}}
++  , antenna_ {new QLineEdit {this}}
++  , club_ {new QLineEdit {this}}
++  , operators_ {new QLineEdit {this}}
++  , remarks_ {new QLineEdit {this}}
++  , score_mode_ {new QComboBox {this}}
++{
++  setWindowTitle (
++    QApplication::applicationName ()
++    + tr (" - Export EDI / REG1TEST"));
++
++  resize (560, 620);
++
++  auto layout =
++    new QVBoxLayout {this};
++
++  auto info =
++    new QLabel {
++      tr ("REG1TEST / EDI export.\n"
++          "One band is exported per file. "
++          "Cabrillo export remains independent."),
++      this};
++
++  info->setWordWrap (true);
++  layout->addWidget (info);
++
++  auto form =
++    new QFormLayout;
++
++  form->setFieldGrowthPolicy (
++    QFormLayout::ExpandingFieldsGrow);
++
++
++  band_->addItem ("50 MHz", "6m");
++  band_->addItem ("70 MHz", "4m");
++  band_->addItem ("145 MHz", "2m");
++  band_->addItem ("435 MHz", "70cm");
++  band_->addItem ("1.3 GHz", "23cm");
++  band_->addItem ("2.3 GHz", "13cm");
++  band_->addItem ("3.4 GHz", "9cm");
++  band_->addItem ("5.7 GHz", "6cm");
++  band_->addItem ("10 GHz", "3cm");
++  band_->addItem ("24 GHz", "1.25cm");
++  band_->addItem ("47 GHz", "6mm");
++  band_->addItem ("76 GHz", "4mm");
++  band_->addItem ("120 GHz", "2.5mm");
++  band_->addItem ("144 GHz", "2mm");
++  band_->addItem ("248 GHz", "1mm");
++
++
++  score_mode_->addItem (
++    tr ("QSO points only"),
++    static_cast<int> (
++      CabrilloLog::EDIScoreMode::QsoPointsOnly));
++
++  score_mode_->addItem (
++    tr ("IARU Region 1 - locator multiplier"),
++    static_cast<int> (
++      CabrilloLog::EDIScoreMode::
++        IaruRegion1LocatorMultiplier));
++
++
++  form->addRow (
++    tr ("Contest name:"), contest_);
++
++  form->addRow (
++    tr ("Band:"), band_);
++
++  form->addRow (
++    tr ("Section:"), section_);
++
++  form->addRow (
++    tr ("Callsign:"), callsign_);
++
++  form->addRow (
++    tr ("Locator:"), locator_);
++
++  form->addRow (
++    tr ("Exchange:"), exchange_);
++
++  form->addRow (
++    tr ("Responsible call:"), responsible_call_);
++
++  form->addRow (
++    tr ("E-mail:"), email_);
++
++  form->addRow (
++    tr ("TX power:"), tx_power_);
++
++  form->addRow (
++    tr ("Antenna:"), antenna_);
++
++  form->addRow (
++    tr ("Club:"), club_);
++
++  form->addRow (
++    tr ("Operators:"), operators_);
++
++  form->addRow (
++    tr ("Remarks:"), remarks_);
++
++  form->addRow (
++    tr ("Scoring:"), score_mode_);
++
++  layout->addLayout (form);
++
++
++  auto buttons =
++    new QDialogButtonBox {
++      QDialogButtonBox::Save
++      | QDialogButtonBox::Cancel,
++      this};
++
++  layout->addWidget (buttons);
++
++  connect (
++    buttons,
++    &QDialogButtonBox::accepted,
++    this,
++    &ExportEDI::save_log);
++
++  connect (
++    buttons,
++    &QDialogButtonBox::rejected,
++    this,
++    &ExportEDI::reject);
++
++
++  //
++  // Valores naturales de WSJT-X como punto de partida.
++  //
++  callsign_->setText (
++    configuration_->my_callsign ());
++
++  locator_->setText (
++    configuration_->my_grid ());
++
++  responsible_call_->setText (
++    configuration_->my_callsign ());
++
++  read_settings ();
++}
++
++
++ExportEDI::~ExportEDI ()
++{
++  write_settings ();
++}
++
++
++void ExportEDI::read_settings ()
++{
++  SettingsGroup group {
++    settings_,
++    "ExportEDI"};
++
++  restoreGeometry (
++    settings_->value (
++      "window/geometry").toByteArray ());
++
++  contest_->setText (
++    settings_->value (
++      "Contest").toString ());
++
++  section_->setText (
++    settings_->value (
++      "Section").toString ());
++
++  exchange_->setText (
++    settings_->value (
++      "Exchange").toString ());
++
++  email_->setText (
++    settings_->value (
++      "Email").toString ());
++
++  tx_power_->setText (
++    settings_->value (
++      "TXPower").toString ());
++
++  antenna_->setText (
++    settings_->value (
++      "Antenna").toString ());
++
++  club_->setText (
++    settings_->value (
++      "Club").toString ());
++
++  operators_->setText (
++    settings_->value (
++      "Operators").toString ());
++
++  remarks_->setText (
++    settings_->value (
++      "Remarks").toString ());
++
++
++  auto const saved_call =
++    settings_->value (
++      "Callsign").toString ();
++
++  if (!saved_call.isEmpty ())
++    callsign_->setText (saved_call);
++
++
++  auto const saved_locator =
++    settings_->value (
++      "Locator").toString ();
++
++  if (!saved_locator.isEmpty ())
++    locator_->setText (saved_locator);
++
++
++  auto const saved_responsible =
++    settings_->value (
++      "ResponsibleCall").toString ();
++
++  if (!saved_responsible.isEmpty ())
++    responsible_call_->setText (
++      saved_responsible);
++
++
++  auto const saved_band =
++    settings_->value (
++      "Band",
++      QStringLiteral ("2m")).toString ();
++
++  int const band_index =
++    band_->findData (saved_band);
++
++  if (band_index >= 0)
++    band_->setCurrentIndex (band_index);
++
++
++  int const score =
++    settings_->value (
++      "ScoreMode",
++      static_cast<int> (
++        CabrilloLog::EDIScoreMode::
++          QsoPointsOnly)).toInt ();
++
++  int const score_index =
++    score_mode_->findData (score);
++
++  if (score_index >= 0)
++    score_mode_->setCurrentIndex (
++      score_index);
++}
++
++
++void ExportEDI::write_settings () const
++{
++  SettingsGroup group {
++    settings_,
++    "ExportEDI"};
++
++  settings_->setValue (
++    "window/geometry",
++    saveGeometry ());
++
++  settings_->setValue (
++    "Contest",
++    contest_->text ());
++
++  settings_->setValue (
++    "Band",
++    band_->currentData ().toString ());
++
++  settings_->setValue (
++    "Section",
++    section_->text ());
++
++  settings_->setValue (
++    "Callsign",
++    callsign_->text ());
++
++  settings_->setValue (
++    "Locator",
++    locator_->text ());
++
++  settings_->setValue (
++    "Exchange",
++    exchange_->text ());
++
++  settings_->setValue (
++    "ResponsibleCall",
++    responsible_call_->text ());
++
++  settings_->setValue (
++    "Email",
++    email_->text ());
++
++  settings_->setValue (
++    "TXPower",
++    tx_power_->text ());
++
++  settings_->setValue (
++    "Antenna",
++    antenna_->text ());
++
++  settings_->setValue (
++    "Club",
++    club_->text ());
++
++  settings_->setValue (
++    "Operators",
++    operators_->text ());
++
++  settings_->setValue (
++    "Remarks",
++    remarks_->text ());
++
++  settings_->setValue (
++    "ScoreMode",
++    score_mode_->currentData ().toInt ());
++
++  settings_->sync ();
++}
++
++
++void ExportEDI::save_log ()
++{
++  write_settings ();
++
++  if (!log_)
++    {
++      MessageBox::warning_message (
++        this,
++        tr ("Export EDI"),
++        tr ("Contest log is not available."));
++
++      return;
++    }
++
++
++  CabrilloLog::EDIExportOptions options;
++
++  options.contest_name =
++    contest_->text ().trimmed ();
++
++  options.band =
++    band_->currentData ().toString ();
++
++  options.section =
++    section_->text ().trimmed ();
++
++  options.callsign =
++    callsign_->text ().trimmed ();
++
++  options.locator =
++    locator_->text ().trimmed ();
++
++  options.exchange =
++    exchange_->text ().trimmed ();
++
++  options.responsible_call =
++    responsible_call_->text ().trimmed ();
++
++  options.email =
++    email_->text ().trimmed ();
++
++  options.tx_power =
++    tx_power_->text ().trimmed ();
++
++  options.antenna =
++    antenna_->text ().trimmed ();
++
++  options.club =
++    club_->text ().trimmed ();
++
++  options.operators =
++    operators_->text ().trimmed ();
++
++  options.remarks =
++    remarks_->text ().trimmed ();
++
++  options.score_mode =
++    static_cast<CabrilloLog::EDIScoreMode> (
++      score_mode_->currentData ().toInt ());
++
++
++  QString file_name =
++    QFileDialog::getSaveFileName (
++      this,
++      tr ("Export EDI / REG1TEST Log"),
++      configuration_->
++        writeable_data_dir ().
++        absoluteFilePath ("wsjtx_log.edi"),
++      tr ("REG1TEST / EDI Log (*.edi)"));
++
++  if (file_name.isEmpty ())
++    return;
++
++
++  if (!file_name.endsWith (
++        QStringLiteral (".edi"),
++        Qt::CaseInsensitive))
++    {
++      file_name +=
++        QStringLiteral (".edi");
++    }
++
++
++  QFile file {file_name};
++
++  if (!file.open (
++        QIODevice::WriteOnly
++        | QIODevice::Text
++        | QIODevice::Truncate))
++    {
++      MessageBox::warning_message (
++        this,
++        tr ("Export EDI File Error"),
++        tr ("Cannot open \"%1\" for writing: %2")
++          .arg (
++            file.fileName (),
++            file.errorString ()));
++
++      return;
++    }
++
++
++  QTextStream out {&file};
++
++  QString error;
++
++  bool const ok =
++    log_->export_edi (
++      out,
++      options,
++      &error);
++
++  out.flush ();
++  file.close ();
++
++
++  if (!ok)
++    {
++      file.remove ();
++
++      MessageBox::warning_message (
++        this,
++        tr ("Export EDI File Error"),
++        error);
++
++      return;
++    }
++
++
++  accept ();
++}
+diff --git a/widgets/ExportEDI.hpp b/widgets/ExportEDI.hpp
+new file mode 100644
+index 000000000..952f672ef
+--- /dev/null
++++ b/widgets/ExportEDI.hpp
+@@ -0,0 +1,55 @@
++#ifndef EXPORT_EDI_HPP_
++#define EXPORT_EDI_HPP_
++
++#include <QDialog>
++
++class QSettings;
++class Configuration;
++class CabrilloLog;
++class QLineEdit;
++class QComboBox;
++
++class ExportEDI final : public QDialog
++{
++  Q_OBJECT
++
++public:
++  explicit ExportEDI (
++    QSettings *,
++    Configuration const *,
++    CabrilloLog const *,
++    QWidget * parent = nullptr);
++
++  ~ExportEDI ();
++
++private:
++  void read_settings ();
++  void write_settings () const;
++  void save_log ();
++
++  QSettings * settings_;
++  Configuration const * configuration_;
++  CabrilloLog const * log_;
++
++  QLineEdit * contest_;
++  QComboBox * band_;
++  QLineEdit * section_;
++
++  QLineEdit * callsign_;
++  QLineEdit * locator_;
++  QLineEdit * exchange_;
++
++  QLineEdit * responsible_call_;
++  QLineEdit * email_;
++
++  QLineEdit * tx_power_;
++  QLineEdit * antenna_;
++
++  QLineEdit * club_;
++  QLineEdit * operators_;
++  QLineEdit * remarks_;
++
++  QComboBox * score_mode_;
++};
++
++#endif
+diff --git a/widgets/mainwindow.cpp b/widgets/mainwindow.cpp
+index f636847e3..13336e7ca 100644
+--- a/widgets/mainwindow.cpp
++++ b/widgets/mainwindow.cpp
+@@ -103,6 +103,7 @@
+ #include "FoxLogWindow.hpp"
+ #include "CabrilloLogWindow.hpp"
+ #include "ExportCabrillo.h"
++#include "ExportEDI.hpp"
+ #include "Network/Cloudlog.hpp"
+ #include "ui_mainwindow.h"
+ #include "moc_mainwindow.cpp"
+@@ -11988,6 +11989,18 @@ void MainWindow::on_reset_cabrillo_log_action_triggered ()
+     }
+ }
+ 
++void MainWindow::on_actionExport_EDI_log_triggered()
++{
++  ExportEDI dialog {
++    m_settings,
++    &m_config,
++    m_logBook.contest_log (),
++    this};
++
++  dialog.exec ();
++}
++
++
+ void MainWindow::on_actionExport_ADIF_log_triggered()
+ {
+   QString const source_name =
+diff --git a/widgets/mainwindow.h b/widgets/mainwindow.h
+index eea2f78bb..95d7cf369 100644
+--- a/widgets/mainwindow.h
++++ b/widgets/mainwindow.h
+@@ -347,6 +347,7 @@ private slots:
+   void on_actionErase_list_of_Q65_callers_triggered();
+   void on_actionExport_Cabrillo_log_triggered();
+   void on_actionExport_ADIF_log_triggered();
++  void on_actionExport_EDI_log_triggered();
+   void startTx2();
+   void startP1();
+   void stopTx();
+diff --git a/widgets/mainwindow.ui b/widgets/mainwindow.ui
+index 0697ba4df..fb8dea062 100644
+--- a/widgets/mainwindow.ui
++++ b/widgets/mainwindow.ui
+@@ -4713,6 +4713,7 @@ QPushButton[state=&quot;ok&quot;] {
+     <addaction name="reset_cabrillo_log_action"/>
+     <addaction name="actionExport_Cabrillo_log"/>
+     <addaction name="actionExport_ADIF_log"/>
++    <addaction name="actionExport_EDI_log"/>
+     <addaction name="actionOpen_log_directory"/>
+     <addaction name="separator"/>
+     <addaction name="actionSettings"/>
+@@ -5373,6 +5374,14 @@ QPushButton[state=&quot;ok&quot;] {
+     <string>Color highlighting scheme</string>
+    </property>
+   </action>
++  <action name="actionExport_EDI_log">
++   <property name="text">
++    <string>Export EDI log...</string>
++   </property>
++   <property name="toolTip">
++    <string>Export contest log in IARU Region 1 REG1TEST / EDI format</string>
++   </property>
++  </action>
+   <action name="actionExport_ADIF_log">
+    <property name="text">
+     <string>Export ADIF log...</string>
+-- 
+2.34.1
+

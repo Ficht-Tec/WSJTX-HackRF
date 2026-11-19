@@ -1,0 +1,30 @@
+# Builds
+build/
+_build/
+install/
+bin/
+
+# Runtime
+logs/
+config/
+*.log
+*.pcm
+*.iq
+*.wav
+
+# Temporary/editor files
+*.bak
+*.orig
+*.rej
+*~
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# CMake generated
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile

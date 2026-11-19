@@ -1,0 +1,243 @@
+From 365f0acc6f596adfcd394606201c24977b92d9e0 Mon Sep 17 00:00:00 2001
+From: Ricardo Jose <ricardo@localhost>
+Date: Mon, 16 Nov 2026 18:27:57 +0000
+Subject: [PATCH 2/8] ui: add native HackRF gain controls dialog
+
+---
+ CMakeLists.txt       |   1 +
+ Configuration.cpp    |   5 +-
+ HackRFGainDialog.cpp | 152 +++++++++++++++++++++++++++++++++++++++++++
+ HackRFGainDialog.hpp |  29 +++++++++
+ 4 files changed, 185 insertions(+), 2 deletions(-)
+ create mode 100644 HackRFGainDialog.cpp
+ create mode 100644 HackRFGainDialog.hpp
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 4b725654c..f339ccbd5 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -341,6 +341,7 @@ set (wsjtx_CXXSRCS
+   WSPR/WsprTxScheduler.cpp
+   widgets/mainwindow.cpp
+   Configuration.cpp
++  HackRFGainDialog.cpp
+   main.cpp
+   Network/wsprnet.cpp
+   WSPR/WSPRBandHopping.cpp
+diff --git a/Configuration.cpp b/Configuration.cpp
+index 051caaa3f..5698e2bd9 100644
+--- a/Configuration.cpp
++++ b/Configuration.cpp
+@@ -1,4 +1,5 @@
+ #include "Configuration.hpp"
++#include "HackRFGainDialog.hpp"
+ 
+ //
+ // Read me!
+@@ -3858,8 +3859,8 @@ void Configuration::impl::on_decoded_text_font_push_button_clicked ()
+ 
+ void Configuration::impl::on_hackrf_controls_button_clicked (bool /*clicked*/)
+ {
+-  MessageBox::information_message (
+-    this, tr ("HackRF Controls"), tr ("HackRF control interface test."));
++  HackRFGainDialog dialog {this};
++  dialog.exec ();
+ }
+ 
+ void Configuration::impl::on_hamlib_download_button_clicked (bool /*clicked*/)
+diff --git a/HackRFGainDialog.cpp b/HackRFGainDialog.cpp
+new file mode 100644
+index 000000000..329f74b56
+--- /dev/null
++++ b/HackRFGainDialog.cpp
+@@ -0,0 +1,152 @@
++#include "HackRFGainDialog.hpp"
++
++#include <QCheckBox>
++#include <QDialogButtonBox>
++#include <QGridLayout>
++#include <QGroupBox>
++#include <QLabel>
++#include <QPlainTextEdit>
++#include <QSlider>
++#include <QVBoxLayout>
++
++HackRFGainDialog::HackRFGainDialog (QWidget * parent)
++  : QDialog {parent}
++  , lna_slider_ {new QSlider {Qt::Horizontal, this}}
++  , vga_slider_ {new QSlider {Qt::Horizontal, this}}
++  , amp_check_ {new QCheckBox {tr ("RX AMP +14 dB"), this}}
++  , tx_vga_slider_ {new QSlider {Qt::Horizontal, this}}
++  , lna_value_ {new QLabel {this}}
++  , vga_value_ {new QLabel {this}}
++  , tx_vga_value_ {new QLabel {this}}
++  , diagnostics_ {new QPlainTextEdit {this}}
++{
++  setWindowTitle (tr ("HackRF Controls"));
++  setMinimumWidth (520);
++
++  //
++  // Receiver
++  //
++  auto * rx_group = new QGroupBox {tr ("Receiver gain"), this};
++  auto * rx_layout = new QGridLayout {rx_group};
++
++  auto * lna_text = new QLabel {tr ("LNA:"), rx_group};
++  auto * vga_text = new QLabel {tr ("VGA:"), rx_group};
++
++  // HackRF LNA: 0, 8, 16, 24, 32, 40 dB
++  lna_slider_->setRange (0, 5);
++  lna_slider_->setSingleStep (1);
++  lna_slider_->setPageStep (1);
++  lna_slider_->setValue (2);
++
++  // HackRF RX VGA: 0..62 dB, steps of 2 dB
++  vga_slider_->setRange (0, 31);
++  vga_slider_->setSingleStep (1);
++  vga_slider_->setPageStep (1);
++  vga_slider_->setValue (10);
++
++  lna_value_->setMinimumWidth (55);
++  vga_value_->setMinimumWidth (55);
++  lna_value_->setAlignment (Qt::AlignRight | Qt::AlignVCenter);
++  vga_value_->setAlignment (Qt::AlignRight | Qt::AlignVCenter);
++
++  rx_layout->addWidget (lna_text,    0, 0);
++  rx_layout->addWidget (lna_slider_, 0, 1);
++  rx_layout->addWidget (lna_value_,  0, 2);
++
++  rx_layout->addWidget (vga_text,    1, 0);
++  rx_layout->addWidget (vga_slider_, 1, 1);
++  rx_layout->addWidget (vga_value_,  1, 2);
++
++  rx_layout->addWidget (amp_check_,  2, 1, 1, 2);
++
++  //
++  // Transmitter
++  //
++  auto * tx_group = new QGroupBox {tr ("Transmitter gain"), this};
++  auto * tx_layout = new QGridLayout {tx_group};
++
++  auto * tx_vga_text = new QLabel {tr ("VGA:"), tx_group};
++
++  // HackRF TX VGA: 0..47 dB
++  tx_vga_slider_->setRange (0, 47);
++  tx_vga_slider_->setSingleStep (1);
++  tx_vga_slider_->setPageStep (1);
++  tx_vga_slider_->setValue (12);
++
++  tx_vga_value_->setMinimumWidth (55);
++  tx_vga_value_->setAlignment (Qt::AlignRight | Qt::AlignVCenter);
++
++  tx_layout->addWidget (tx_vga_text,    0, 0);
++  tx_layout->addWidget (tx_vga_slider_, 0, 1);
++  tx_layout->addWidget (tx_vga_value_,  0, 2);
++
++  //
++  // Diagnostics
++  //
++  auto * diag_group = new QGroupBox {tr ("HackRF / USB diagnostics"), this};
++  auto * diag_layout = new QVBoxLayout {diag_group};
++
++  diagnostics_->setReadOnly (true);
++  diagnostics_->setMaximumBlockCount (500);
++  diagnostics_->setMinimumHeight (125);
++  diagnostics_->setPlainText (
++    tr ("HackRF control interface\n"
++        "CAT bridge: not connected\n"
++        "USB diagnostics: not connected\n"
++        "\n"
++        "UI test mode - no commands are being sent."));
++
++  diag_layout->addWidget (diagnostics_);
++
++  //
++  // Buttons
++  //
++  auto * buttons =
++    new QDialogButtonBox {QDialogButtonBox::Close, Qt::Horizontal, this};
++
++  connect (buttons, &QDialogButtonBox::rejected,
++           this, &QDialog::reject);
++
++  //
++  // Local UI updates only.
++  //
++  auto update_lna = [this] (int step)
++  {
++    lna_value_->setText (QString::number (step * 8) + tr (" dB"));
++  };
++
++  auto update_vga = [this] (int step)
++  {
++    vga_value_->setText (QString::number (step * 2) + tr (" dB"));
++  };
++
++  auto update_tx_vga = [this] (int value)
++  {
++    tx_vga_value_->setText (QString::number (value) + tr (" dB"));
++  };
++
++  connect (lna_slider_, &QSlider::valueChanged,
++           this, update_lna);
++
++  connect (vga_slider_, &QSlider::valueChanged,
++           this, update_vga);
++
++  connect (tx_vga_slider_, &QSlider::valueChanged,
++           this, update_tx_vga);
++
++  update_lna (lna_slider_->value ());
++  update_vga (vga_slider_->value ());
++  update_tx_vga (tx_vga_slider_->value ());
++
++  //
++  // Main layout
++  //
++  auto * main_layout = new QVBoxLayout {this};
++
++  main_layout->addWidget (rx_group);
++  main_layout->addWidget (tx_group);
++  main_layout->addWidget (diag_group);
++  main_layout->addWidget (buttons);
++
++  setLayout (main_layout);
++}
+diff --git a/HackRFGainDialog.hpp b/HackRFGainDialog.hpp
+new file mode 100644
+index 000000000..79c01ff38
+--- /dev/null
++++ b/HackRFGainDialog.hpp
+@@ -0,0 +1,29 @@
++#ifndef HACKRF_GAIN_DIALOG_HPP
++#define HACKRF_GAIN_DIALOG_HPP
++
++#include <QDialog>
++
++class QLabel;
++class QSlider;
++class QCheckBox;
++class QPlainTextEdit;
++
++class HackRFGainDialog final : public QDialog
++{
++public:
++  explicit HackRFGainDialog (QWidget * parent = nullptr);
++
++private:
++  QSlider * lna_slider_;
++  QSlider * vga_slider_;
++  QCheckBox * amp_check_;
++  QSlider * tx_vga_slider_;
++
++  QLabel * lna_value_;
++  QLabel * vga_value_;
++  QLabel * tx_vga_value_;
++
++  QPlainTextEdit * diagnostics_;
++};
++
++#endif
+-- 
+2.34.1
+

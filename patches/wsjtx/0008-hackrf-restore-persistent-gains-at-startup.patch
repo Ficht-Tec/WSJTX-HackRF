@@ -1,0 +1,283 @@
+From 2c54e14d5cb32b8fe04405f10ec3583c622021f9 Mon Sep 17 00:00:00 2001
+From: Ricardo Jose <ricardo@localhost>
+Date: Tue, 17 Nov 2026 23:14:38 +0000
+Subject: [PATCH 8/8] hackrf: restore persistent gains at startup
+
+---
+ Configuration.cpp    |  14 +++
+ HackRFGainDialog.cpp | 219 +++++++++++++++++++++++++++++++++++++++++++
+ HackRFGainDialog.hpp |   3 +
+ 3 files changed, 236 insertions(+)
+
+diff --git a/Configuration.cpp b/Configuration.cpp
+index 1522e16e2..dea9e589a 100644
+--- a/Configuration.cpp
++++ b/Configuration.cpp
+@@ -1815,6 +1815,20 @@ Configuration::impl::impl (Configuration * self, QNetworkAccessManager * network
+ {
+   ui_->setupUi (this);
+ 
++  //
++  // Restaurar automáticamente las ganancias HackRF persistidas.
++  // El bridge se inicia antes que WSJT-X; el pequeño retardo permite
++  // que su ciclo RX quede completamente preparado.
++  //
++  QTimer::singleShot (
++    750,
++    this,
++    [this]
++    {
++      HackRFGainDialog::restoreSavedGainsAtStartup (
++        settings_);
++    });
++
+   {
+     // Make sure the default save directory exists
+     QString save_dir {"save"};
+diff --git a/HackRFGainDialog.cpp b/HackRFGainDialog.cpp
+index 5b227298c..54aa04a7f 100644
+--- a/HackRFGainDialog.cpp
++++ b/HackRFGainDialog.cpp
+@@ -88,6 +88,225 @@ namespace
+ }
+ 
+ 
++
++bool HackRFGainDialog::restoreSavedGainsAtStartup (
++  QSettings * settings)
++{
++  if (!settings)
++    {
++      return false;
++    }
++
++  //
++  // Si todavía no existe configuración persistente,
++  // dejamos que el diálogo adopte los valores actuales
++  // del bridge la primera vez que se abra.
++  //
++  bool const have_saved =
++    settings->contains (
++      QStringLiteral ("HackRF/LNA"))
++    || settings->contains (
++      QStringLiteral ("HackRF/VGA"))
++    || settings->contains (
++      QStringLiteral ("HackRF/AMP"))
++    || settings->contains (
++      QStringLiteral ("HackRF/TXVGA"));
++
++  if (!have_saved)
++    {
++      return true;
++    }
++
++  auto command =
++    [] (QString const& text,
++        QString * response = nullptr) -> bool
++    {
++      QTcpSocket socket;
++
++      socket.connectToHost (
++        QStringLiteral ("127.0.0.1"),
++        hackrf_cat_port);
++
++      if (!socket.waitForConnected (
++            cat_connect_timeout_ms))
++        {
++          return false;
++        }
++
++      QByteArray request =
++        text.toLatin1 ();
++
++      request.append ('\n');
++
++      if (socket.write (request) < 0)
++        {
++          return false;
++        }
++
++      if (!socket.waitForBytesWritten (
++            cat_connect_timeout_ms))
++        {
++          return false;
++        }
++
++      QByteArray data;
++
++      QElapsedTimer elapsed;
++      elapsed.start ();
++
++      while (!data.contains ('\n')
++             && data.size () < 4096
++             && elapsed.elapsed ()
++                  < cat_read_timeout_ms)
++        {
++          data.append (socket.readAll ());
++
++          if (data.contains ('\n'))
++            {
++              break;
++            }
++
++          int const remaining =
++            cat_read_timeout_ms
++            - static_cast<int> (
++                elapsed.elapsed ());
++
++          if (remaining <= 0)
++            {
++              break;
++            }
++
++          if (!socket.waitForReadyRead (remaining))
++            {
++              break;
++            }
++        }
++
++      data.append (socket.readAll ());
++
++      QString const result =
++        QString::fromUtf8 (data)
++          .trimmed ()
++          .section ('\n', 0, 0)
++          .trimmed ();
++
++      if (result.isEmpty ())
++        {
++          return false;
++        }
++
++      if (response)
++        {
++          *response = result;
++        }
++
++      return true;
++    };
++
++
++  QString raw_status;
++
++  if (!command (
++        QStringLiteral ("\\status"),
++        &raw_status))
++    {
++      return false;
++    }
++
++  auto const fields =
++    parseStatus (raw_status);
++
++  //
++  // Nunca modificar ganancias durante TX.
++  //
++  if (fields.value (
++        QStringLiteral ("ptt_sim"))
++      == QStringLiteral ("1"))
++    {
++      return false;
++    }
++
++
++  int const lna =
++    settings->value (
++      QStringLiteral ("HackRF/LNA"),
++      -1).toInt ();
++
++  int const vga =
++    settings->value (
++      QStringLiteral ("HackRF/VGA"),
++      -1).toInt ();
++
++  bool const amp =
++    settings->value (
++      QStringLiteral ("HackRF/AMP"),
++      false).toBool ();
++
++  int const tx_vga =
++    settings->value (
++      QStringLiteral ("HackRF/TXVGA"),
++      -1).toInt ();
++
++
++  QString response;
++
++  if (lna >= 0
++      && lna <= 40
++      && (lna % 8) == 0)
++    {
++      if (!command (
++            QStringLiteral ("\\set_lna %1")
++              .arg (lna),
++            &response)
++          || response != QStringLiteral ("RPRT 0"))
++        {
++          return false;
++        }
++    }
++
++
++  if (vga >= 0
++      && vga <= 62
++      && (vga % 2) == 0)
++    {
++      if (!command (
++            QStringLiteral ("\\set_vga %1")
++              .arg (vga),
++            &response)
++          || response != QStringLiteral ("RPRT 0"))
++        {
++          return false;
++        }
++    }
++
++
++  if (!command (
++        QStringLiteral ("\\set_amp %1")
++          .arg (amp ? 1 : 0),
++        &response)
++      || response != QStringLiteral ("RPRT 0"))
++    {
++      return false;
++    }
++
++
++  if (tx_vga >= 0
++      && tx_vga <= 47)
++    {
++      if (!command (
++            QStringLiteral ("\\set_tx_vga %1")
++              .arg (tx_vga),
++            &response)
++          || response != QStringLiteral ("RPRT 0"))
++        {
++          return false;
++        }
++    }
++
++  return true;
++}
++
++
+ HackRFGainDialog::HackRFGainDialog (
+   QSettings * settings,
+   QWidget * parent)
+diff --git a/HackRFGainDialog.hpp b/HackRFGainDialog.hpp
+index ef2324365..bdbf6ca68 100644
+--- a/HackRFGainDialog.hpp
++++ b/HackRFGainDialog.hpp
+@@ -18,6 +18,9 @@ public:
+     QSettings * settings,
+     QWidget * parent = nullptr);
+ 
++  static bool restoreSavedGainsAtStartup (
++    QSettings * settings);
++
+ private:
+   QString catCommand (
+     QString const& command,
+-- 
+2.34.1
+

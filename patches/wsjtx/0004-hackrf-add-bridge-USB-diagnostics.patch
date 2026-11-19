@@ -1,0 +1,388 @@
+From e23decbfd76e60ddfd68b478ee5256eac6d4ac5c Mon Sep 17 00:00:00 2001
+From: Ricardo Jose <ricardo@localhost>
+Date: Mon, 16 Nov 2026 20:09:47 +0000
+Subject: [PATCH 4/8] hackrf: add bridge USB diagnostics
+
+---
+ HackRFGainDialog.cpp | 331 +++++++++++++++++++++++++++++++++++++++++--
+ HackRFGainDialog.hpp |   3 +
+ 2 files changed, 324 insertions(+), 10 deletions(-)
+
+diff --git a/HackRFGainDialog.cpp b/HackRFGainDialog.cpp
+index 79670f864..5b227298c 100644
+--- a/HackRFGainDialog.cpp
++++ b/HackRFGainDialog.cpp
+@@ -3,6 +3,8 @@
+ #include <QCheckBox>
+ #include <QDialogButtonBox>
+ #include <QElapsedTimer>
++#include <QFile>
++#include <QFileInfo>
+ #include <QGridLayout>
+ #include <QGroupBox>
+ #include <QLabel>
+@@ -41,6 +43,48 @@ namespace
+ 
+     return result;
+   }
++
++
++  QString lastLineContaining (
++    QStringList const& rows,
++    QString const& marker)
++  {
++    for (auto it = rows.crbegin ();
++         it != rows.crend ();
++         ++it)
++      {
++        if (it->contains (marker))
++          {
++            return *it;
++          }
++      }
++
++    return {};
++  }
++
++
++  QMap<QString, QString> parseProperties (
++    QString const& line)
++  {
++    QMap<QString, QString> result;
++
++    auto const tokens =
++      line.split (' ', QString::SkipEmptyParts);
++
++    for (auto const& token : tokens)
++      {
++        auto const pos = token.indexOf ('=');
++
++        if (pos > 0)
++          {
++            result.insert (
++              token.left (pos),
++              token.mid (pos + 1));
++          }
++      }
++
++    return result;
++  }
+ }
+ 
+ 
+@@ -755,21 +799,288 @@ void HackRFGainDialog::refreshStatus ()
+           QStringLiteral ("—"))));
+ 
+ 
+-  diagnostics_->setPlainText (
+-    tr ("CAT bridge: connected\n"
+-        "Address: 127.0.0.1:4532\n"
+-        "RF TX state: %1\n\n"
+-        "Raw bridge status:\n%2\n\n"
+-        "USB block diagnostics will be added "
+-        "from the HackRF bridge log in the "
+-        "next integration step.")
+-      .arg (rf_tx, raw));
+-
++  refreshDiagnostics (raw, rf_tx);
+ 
+   updating_ui_ = false;
+ }
+ 
+ 
++void HackRFGainDialog::refreshDiagnostics (
++  QString const& raw_status,
++  QString const& rf_tx)
++{
++  QString const log_path =
++    qEnvironmentVariable (
++      "WSJTX_HACKRF_BRIDGE_LOG");
++
++  if (log_path.isEmpty ())
++    {
++      diagnostics_->setPlainText (
++        tr ("CAT bridge: connected\n"
++            "Address: 127.0.0.1:4532\n"
++            "RF TX state: %1\n\n"
++            "Raw bridge status:\n%2\n\n"
++            "USB diagnostics unavailable.\n"
++            "Set WSJTX_HACKRF_BRIDGE_LOG to "
++            "the bridge-f4.log path.")
++          .arg (rf_tx, raw_status));
++
++      return;
++    }
++
++  QFile file {log_path};
++
++  if (!file.open (QIODevice::ReadOnly))
++    {
++      diagnostics_->setPlainText (
++        tr ("CAT bridge: connected\n"
++            "Address: 127.0.0.1:4532\n"
++            "RF TX state: %1\n\n"
++            "USB diagnostics: cannot read\n"
++            "%2\n\n"
++            "%3")
++          .arg (
++            rf_tx,
++            log_path,
++            file.errorString ()));
++
++      return;
++    }
++
++  qint64 const length =
++    file.size ();
++
++  qint64 const start =
++    length > 300000
++      ? length - 300000
++      : 0;
++
++  if (!file.seek (start))
++    {
++      diagnostics_->setPlainText (
++        tr ("USB diagnostics: cannot seek in\n%1")
++          .arg (log_path));
++
++      return;
++    }
++
++  QString const content =
++    QString::fromUtf8 (file.readAll ());
++
++  QStringList rows =
++    content.split ('\n');
++
++  auto const rx =
++    parseProperties (
++      lastLineContaining (
++        rows,
++        QStringLiteral ("RX callbacks=")));
++
++  auto const tx =
++    parseProperties (
++      lastLineContaining (
++        rows,
++        QStringLiteral ("TX_QUEUE elapsed_s=")));
++
++  auto const off =
++    parseProperties (
++      lastLineContaining (
++        rows,
++        QStringLiteral ("RF_TX=OFF iq_sent=")));
++
++  auto const prime =
++    parseProperties (
++      lastLineContaining (
++        rows,
++        QStringLiteral ("TX_PRIME target_bytes=")));
++
++  auto const drain =
++    parseProperties (
++      lastLineContaining (
++        rows,
++        QStringLiteral (
++          "TX_FINAL_DRAIN producer_finished=")));
++
++  auto const quality =
++    parseProperties (
++      lastLineContaining (
++        rows,
++        QStringLiteral (
++          "TX_QUALITY active_underrun_events=")));
++
++  auto const cycle =
++    parseProperties (
++      lastLineContaining (
++        rows,
++        QStringLiteral ("RX_CYCLE RX_READY")));
++
++
++  auto value =
++    [] (QMap<QString, QString> const& map,
++        QString const& key)
++    {
++      return map.value (
++        key,
++        QStringLiteral ("—"));
++    };
++
++
++  QStringList lines;
++
++  bool const usb_tx_disabled =
++    rf_tx == QStringLiteral ("DISABLED");
++
++  lines
++    << tr ("CAT bridge: connected")
++    << tr ("Address: 127.0.0.1:4532")
++    << tr ("RF TX state: %1").arg (rf_tx)
++    << QString {}
++    << tr ("USB / block diagnostics")
++    << tr ("Log: %1").arg (log_path)
++
++    << tr ("RX  state: %1   queue: %2   peak: %3")
++         .arg (
++           value (rx, QStringLiteral ("state")),
++           value (rx, QStringLiteral ("queue")),
++           value (rx, QStringLiteral ("peak")))
++
++    << tr ("RX  new losses: %1   tune drops: %2")
++         .arg (
++           value (
++             rx,
++             QStringLiteral ("lost_interval")),
++           value (
++             rx,
++             QStringLiteral ("tune_interval")))
++
++    << tr ("RX  first callback: %1 ms")
++         .arg (
++           value (
++             cycle,
++             QStringLiteral (
++               "first_rx_callback_ms")));
++
++  if (usb_tx_disabled)
++    {
++      lines
++        << QString {}
++        << tr ("TX USB diagnostics: unavailable "
++               "(RF TX disabled)")
++        << tr ("CAT/PTT simulation remains available.");
++    }
++  else
++    {
++      lines
++        << tr ("TX  queued: %1   peak: %2 B")
++         .arg (
++           value (
++             tx,
++             QStringLiteral ("queued")),
++           value (
++             tx,
++             QStringLiteral ("peak")))
++
++    << tr ("TX  callbacks/interval: %1   IQ: %2 B")
++         .arg (
++           value (
++             tx,
++             QStringLiteral ("cb_interval")),
++           value (
++             tx,
++             QStringLiteral ("iq_interval")))
++
++    << tr ("TX  missing/interval: %1 B   overflows: %2")
++         .arg (
++           value (
++             tx,
++             QStringLiteral ("underrun_interval")),
++           value (
++             tx,
++             QStringLiteral ("overflows")))
++
++    << tr ("TX  last cycle: IQ=%1 B   padding=%2 B")
++         .arg (
++           value (
++             off,
++             QStringLiteral ("iq_sent")),
++           value (
++             off,
++             QStringLiteral ("underrun_bytes")))
++
++    << tr ("TX  active underruns: %1 events / %2 B")
++         .arg (
++           value (
++             quality,
++             QStringLiteral (
++               "active_underrun_events")),
++           value (
++             quality,
++             QStringLiteral (
++               "active_underrun_bytes")))
++
++    << tr ("TX  closing padding: %1 events / %2 B")
++         .arg (
++           value (
++             quality,
++             QStringLiteral (
++               "closing_padding_events")),
++           value (
++             quality,
++             QStringLiteral (
++               "closing_padding_bytes")))
++
++    << tr ("TX  total USB zero fill: %1 B")
++         .arg (
++           value (
++             quality,
++             QStringLiteral (
++               "total_usb_zero_bytes")))
++
++    << tr ("TX  prime: %1 B   wait: %2 ms")
++         .arg (
++           value (
++             prime,
++             QStringLiteral ("queued_bytes")),
++           value (
++             prime,
++             QStringLiteral ("wait_ms")))
++
++    << tr ("TX  final drain: producer=%1   drained=%2   remaining=%3 B")
++         .arg (
++           value (
++             drain,
++             QStringLiteral (
++               "producer_finished")),
++           value (
++             drain,
++             QStringLiteral ("drained")),
++           value (
++             drain,
++             QStringLiteral (
++               "queued_on_stop")))
++
++        << tr ("TX  final wait: %1 ms + USB margin")
++             .arg (
++               value (
++                 drain,
++                 QStringLiteral (
++                   "drain_wait_ms")));
++
++    }
++
++  lines
++    << QString {}
++    << tr ("Raw bridge status:")
++    << raw_status
++    << QString {}
++    << tr ("Log measurements; current state and "
++           "last completed TX cycle may differ.");
++
++  diagnostics_->setPlainText (
++    lines.join ('\n'));
++}
++
++
+ void HackRFGainDialog::setLna ()
+ {
+   if (!connected_ || updating_ui_)
+diff --git a/HackRFGainDialog.hpp b/HackRFGainDialog.hpp
+index 150ee5d37..ef2324365 100644
+--- a/HackRFGainDialog.hpp
++++ b/HackRFGainDialog.hpp
+@@ -24,6 +24,9 @@ private:
+     bool * ok = nullptr);
+ 
+   void refreshStatus ();
++  void refreshDiagnostics (
++    QString const& raw_status,
++    QString const& rf_tx);
+   void setConnected (bool connected);
+   void setStatusError (QString const& text);
+ 
+-- 
+2.34.1
+

@@ -1,0 +1,164 @@
+From f9eecc3dad1aaa443f4b028762c7ea94658bcfdf Mon Sep 17 00:00:00 2001
+From: Ricardo Jose <ricardo@localhost>
+Date: Mon, 16 Nov 2026 20:31:30 +0000
+Subject: [PATCH 5/8] log: add explicit ADIF export
+
+---
+ widgets/mainwindow.cpp | 100 +++++++++++++++++++++++++++++++++++++++++
+ widgets/mainwindow.h   |   1 +
+ widgets/mainwindow.ui  |   9 ++++
+ 3 files changed, 110 insertions(+)
+
+diff --git a/widgets/mainwindow.cpp b/widgets/mainwindow.cpp
+index dc7e1d2dd..f636847e3 100644
+--- a/widgets/mainwindow.cpp
++++ b/widgets/mainwindow.cpp
+@@ -11988,6 +11988,106 @@ void MainWindow::on_reset_cabrillo_log_action_triggered ()
+     }
+ }
+ 
++void MainWindow::on_actionExport_ADIF_log_triggered()
++{
++  QString const source_name =
++    m_config.writeable_data_dir ()
++      .absoluteFilePath ("wsjtx_log.adi");
++
++  QFile source {source_name};
++
++  if (!source.exists ())
++    {
++      MessageBox::warning_message (
++        this,
++        tr ("Export ADIF Log"),
++        tr ("The ADIF log does not exist:\n%1")
++          .arg (source_name));
++
++      return;
++    }
++
++  QString file_name =
++    QFileDialog::getSaveFileName (
++      this,
++      tr ("Export ADIF Log"),
++      QDir::home ().absoluteFilePath ("wsjtx_log.adif"),
++      tr ("ADIF Log (*.adif);;ADI Log (*.adi);;All files (*)"));
++
++  if (file_name.isEmpty ())
++    {
++      return;
++    }
++
++  //
++  // La extensión .adi y .adif contienen el mismo formato ADIF.
++  // Si no se especifica ninguna, usamos .adif para la exportación.
++  //
++  if (!file_name.endsWith (
++        QStringLiteral (".adif"),
++        Qt::CaseInsensitive)
++      && !file_name.endsWith (
++        QStringLiteral (".adi"),
++        Qt::CaseInsensitive))
++    {
++      file_name += QStringLiteral (".adif");
++    }
++
++  if (!source.open (QIODevice::ReadOnly))
++    {
++      MessageBox::warning_message (
++        this,
++        tr ("Export ADIF Log"),
++        tr ("Cannot open \"%1\" for reading")
++          .arg (source.fileName ()),
++        tr ("Error: %1")
++          .arg (source.errorString ()));
++
++      return;
++    }
++
++  QByteArray const data = source.readAll ();
++  source.close ();
++
++  QFile destination {file_name};
++
++  if (!destination.open (
++        QIODevice::WriteOnly
++        | QIODevice::Truncate))
++    {
++      MessageBox::warning_message (
++        this,
++        tr ("Export ADIF Log"),
++        tr ("Cannot open \"%1\" for writing")
++          .arg (destination.fileName ()),
++        tr ("Error: %1")
++          .arg (destination.errorString ()));
++
++      return;
++    }
++
++  qint64 const written =
++    destination.write (data);
++
++  destination.close ();
++
++  if (written != data.size ())
++    {
++      MessageBox::warning_message (
++        this,
++        tr ("Export ADIF Log"),
++        tr ("The ADIF log could not be completely written to:\n%1")
++          .arg (file_name));
++
++      return;
++    }
++
++  showStatusMessage (
++    tr ("ADIF log exported to %1")
++      .arg (file_name));
++}
++
++
+ void MainWindow::on_actionExport_Cabrillo_log_triggered()
+ {
+   if (QDialog::Accepted == ExportCabrillo {m_settings, &m_config, m_logBook.contest_log ()}.exec())
+diff --git a/widgets/mainwindow.h b/widgets/mainwindow.h
+index 7aee7db64..eea2f78bb 100644
+--- a/widgets/mainwindow.h
++++ b/widgets/mainwindow.h
+@@ -346,6 +346,7 @@ private slots:
+   void on_actionErase_WSPR_hashtable_triggered();
+   void on_actionErase_list_of_Q65_callers_triggered();
+   void on_actionExport_Cabrillo_log_triggered();
++  void on_actionExport_ADIF_log_triggered();
+   void startTx2();
+   void startP1();
+   void stopTx();
+diff --git a/widgets/mainwindow.ui b/widgets/mainwindow.ui
+index d9d83bacf..0697ba4df 100644
+--- a/widgets/mainwindow.ui
++++ b/widgets/mainwindow.ui
+@@ -4712,6 +4712,7 @@ QPushButton[state=&quot;ok&quot;] {
+     <addaction name="actionErase_list_of_Q65_callers"/>
+     <addaction name="reset_cabrillo_log_action"/>
+     <addaction name="actionExport_Cabrillo_log"/>
++    <addaction name="actionExport_ADIF_log"/>
+     <addaction name="actionOpen_log_directory"/>
+     <addaction name="separator"/>
+     <addaction name="actionSettings"/>
+@@ -5372,6 +5373,14 @@ QPushButton[state=&quot;ok&quot;] {
+     <string>Color highlighting scheme</string>
+    </property>
+   </action>
++  <action name="actionExport_ADIF_log">
++   <property name="text">
++    <string>Export ADIF log...</string>
++   </property>
++   <property name="toolTip">
++    <string>Export wsjtx_log.adi as an ADIF file</string>
++   </property>
++  </action>
+   <action name="actionExport_Cabrillo_log">
+    <property name="text">
+     <string>Export Cabrillo log ...</string>
+-- 
+2.34.1
+

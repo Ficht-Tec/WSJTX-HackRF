@@ -1,0 +1,1084 @@
+From 57417ebb4382f3e97e931a6fd2c4d09c4cbe3687 Mon Sep 17 00:00:00 2001
+From: Ricardo Jose <ricardo@localhost>
+Date: Mon, 16 Nov 2026 19:34:45 +0000
+Subject: [PATCH 3/8] hackrf: add CAT gain control and persistent settings
+
+---
+ Configuration.cpp    |   2 +-
+ HackRFGainDialog.cpp | 888 ++++++++++++++++++++++++++++++++++++++++---
+ HackRFGainDialog.hpp |  41 +-
+ 3 files changed, 873 insertions(+), 58 deletions(-)
+
+diff --git a/Configuration.cpp b/Configuration.cpp
+index 5698e2bd9..1522e16e2 100644
+--- a/Configuration.cpp
++++ b/Configuration.cpp
+@@ -3859,7 +3859,7 @@ void Configuration::impl::on_decoded_text_font_push_button_clicked ()
+ 
+ void Configuration::impl::on_hackrf_controls_button_clicked (bool /*clicked*/)
+ {
+-  HackRFGainDialog dialog {this};
++  HackRFGainDialog dialog {settings_, this};
+   dialog.exec ();
+ }
+ 
+diff --git a/HackRFGainDialog.cpp b/HackRFGainDialog.cpp
+index 329f74b56..79670f864 100644
+--- a/HackRFGainDialog.cpp
++++ b/HackRFGainDialog.cpp
+@@ -2,15 +2,53 @@
+ 
+ #include <QCheckBox>
+ #include <QDialogButtonBox>
++#include <QElapsedTimer>
+ #include <QGridLayout>
+ #include <QGroupBox>
+ #include <QLabel>
++#include <QMap>
+ #include <QPlainTextEdit>
++#include <QSettings>
++#include <QSignalBlocker>
+ #include <QSlider>
++#include <QTcpSocket>
++#include <QTimer>
+ #include <QVBoxLayout>
+ 
+-HackRFGainDialog::HackRFGainDialog (QWidget * parent)
++namespace
++{
++  constexpr quint16 hackrf_cat_port = 4532;
++  constexpr int cat_connect_timeout_ms = 1200;
++  constexpr int cat_read_timeout_ms = 1600;
++
++  QMap<QString, QString> parseStatus (QString const& status)
++  {
++    QMap<QString, QString> result;
++
++    auto const tokens =
++      status.split (' ', QString::SkipEmptyParts);
++
++    for (auto const& token : tokens)
++      {
++        auto const pos = token.indexOf ('=');
++
++        if (pos > 0)
++          {
++            result.insert (token.left (pos),
++                           token.mid (pos + 1));
++          }
++      }
++
++    return result;
++  }
++}
++
++
++HackRFGainDialog::HackRFGainDialog (
++  QSettings * settings,
++  QWidget * parent)
+   : QDialog {parent}
++  , settings_ {settings}
+   , lna_slider_ {new QSlider {Qt::Horizontal, this}}
+   , vga_slider_ {new QSlider {Qt::Horizontal, this}}
+   , amp_check_ {new QCheckBox {tr ("RX AMP +14 dB"), this}}
+@@ -18,7 +56,10 @@ HackRFGainDialog::HackRFGainDialog (QWidget * parent)
+   , lna_value_ {new QLabel {this}}
+   , vga_value_ {new QLabel {this}}
+   , tx_vga_value_ {new QLabel {this}}
++  , frequency_label_ {new QLabel {this}}
++  , bridge_status_label_ {new QLabel {this}}
+   , diagnostics_ {new QPlainTextEdit {this}}
++  , refresh_timer_ {new QTimer {this}}
+ {
+   setWindowTitle (tr ("HackRF Controls"));
+   setMinimumWidth (520);
+@@ -26,28 +67,38 @@ HackRFGainDialog::HackRFGainDialog (QWidget * parent)
+   //
+   // Receiver
+   //
+-  auto * rx_group = new QGroupBox {tr ("Receiver gain"), this};
+-  auto * rx_layout = new QGridLayout {rx_group};
++  auto * rx_group =
++    new QGroupBox {tr ("Receiver gain"), this};
++
++  auto * rx_layout =
++    new QGridLayout {rx_group};
++
++  auto * lna_text =
++    new QLabel {tr ("LNA:"), rx_group};
++
++  auto * vga_text =
++    new QLabel {tr ("VGA:"), rx_group};
+ 
+-  auto * lna_text = new QLabel {tr ("LNA:"), rx_group};
+-  auto * vga_text = new QLabel {tr ("VGA:"), rx_group};
+ 
+   // HackRF LNA: 0, 8, 16, 24, 32, 40 dB
+   lna_slider_->setRange (0, 5);
+   lna_slider_->setSingleStep (1);
+   lna_slider_->setPageStep (1);
+-  lna_slider_->setValue (2);
+ 
+   // HackRF RX VGA: 0..62 dB, steps of 2 dB
+   vga_slider_->setRange (0, 31);
+   vga_slider_->setSingleStep (1);
+   vga_slider_->setPageStep (1);
+-  vga_slider_->setValue (10);
+ 
+-  lna_value_->setMinimumWidth (55);
+-  vga_value_->setMinimumWidth (55);
+-  lna_value_->setAlignment (Qt::AlignRight | Qt::AlignVCenter);
+-  vga_value_->setAlignment (Qt::AlignRight | Qt::AlignVCenter);
++  lna_value_->setMinimumWidth (85);
++  vga_value_->setMinimumWidth (85);
++
++  lna_value_->setAlignment (
++    Qt::AlignRight | Qt::AlignVCenter);
++
++  vga_value_->setAlignment (
++    Qt::AlignRight | Qt::AlignVCenter);
++
+ 
+   rx_layout->addWidget (lna_text,    0, 0);
+   rx_layout->addWidget (lna_slider_, 0, 1);
+@@ -57,96 +108,821 @@ HackRFGainDialog::HackRFGainDialog (QWidget * parent)
+   rx_layout->addWidget (vga_slider_, 1, 1);
+   rx_layout->addWidget (vga_value_,  1, 2);
+ 
+-  rx_layout->addWidget (amp_check_,  2, 1, 1, 2);
++  rx_layout->addWidget (amp_check_,
++                        2, 1, 1, 2);
++
+ 
+   //
+   // Transmitter
+   //
+-  auto * tx_group = new QGroupBox {tr ("Transmitter gain"), this};
+-  auto * tx_layout = new QGridLayout {tx_group};
++  auto * tx_group =
++    new QGroupBox {tr ("Transmitter gain"), this};
++
++  auto * tx_layout =
++    new QGridLayout {tx_group};
+ 
+-  auto * tx_vga_text = new QLabel {tr ("VGA:"), tx_group};
++  auto * tx_vga_text =
++    new QLabel {tr ("VGA:"), tx_group};
+ 
+   // HackRF TX VGA: 0..47 dB
+   tx_vga_slider_->setRange (0, 47);
+   tx_vga_slider_->setSingleStep (1);
+   tx_vga_slider_->setPageStep (1);
+-  tx_vga_slider_->setValue (12);
+ 
+-  tx_vga_value_->setMinimumWidth (55);
+-  tx_vga_value_->setAlignment (Qt::AlignRight | Qt::AlignVCenter);
++  tx_vga_value_->setMinimumWidth (85);
++
++  tx_vga_value_->setAlignment (
++    Qt::AlignRight | Qt::AlignVCenter);
++
++  tx_layout->addWidget (tx_vga_text,
++                        0, 0);
++
++  tx_layout->addWidget (tx_vga_slider_,
++                        0, 1);
++
++  tx_layout->addWidget (tx_vga_value_,
++                        0, 2);
+ 
+-  tx_layout->addWidget (tx_vga_text,    0, 0);
+-  tx_layout->addWidget (tx_vga_slider_, 0, 1);
+-  tx_layout->addWidget (tx_vga_value_,  0, 2);
+ 
+   //
+   // Diagnostics
+   //
+-  auto * diag_group = new QGroupBox {tr ("HackRF / USB diagnostics"), this};
+-  auto * diag_layout = new QVBoxLayout {diag_group};
++  auto * diag_group =
++    new QGroupBox {
++      tr ("HackRF / USB diagnostics"), this};
++
++  auto * diag_layout =
++    new QVBoxLayout {diag_group};
+ 
+   diagnostics_->setReadOnly (true);
+   diagnostics_->setMaximumBlockCount (500);
+   diagnostics_->setMinimumHeight (125);
+-  diagnostics_->setPlainText (
+-    tr ("HackRF control interface\n"
+-        "CAT bridge: not connected\n"
+-        "USB diagnostics: not connected\n"
+-        "\n"
+-        "UI test mode - no commands are being sent."));
+ 
+   diag_layout->addWidget (diagnostics_);
+ 
++
++  //
++  // Status
++  //
++  frequency_label_->setText (
++    tr ("CAT frequency: —"));
++
++  bridge_status_label_->setWordWrap (true);
++
++  bridge_status_label_->setText (
++    tr ("Connecting to HackRF bridge..."));
++
++
+   //
+-  // Buttons
++  // Close
+   //
+   auto * buttons =
+-    new QDialogButtonBox {QDialogButtonBox::Close, Qt::Horizontal, this};
++    new QDialogButtonBox {
++      QDialogButtonBox::Close,
++      Qt::Horizontal,
++      this};
++
++  connect (buttons,
++           &QDialogButtonBox::rejected,
++           this,
++           &QDialog::reject);
+ 
+-  connect (buttons, &QDialogButtonBox::rejected,
+-           this, &QDialog::reject);
+ 
+   //
+-  // Local UI updates only.
++  // Local labels
+   //
+-  auto update_lna = [this] (int step)
+-  {
+-    lna_value_->setText (QString::number (step * 8) + tr (" dB"));
+-  };
++  connect (lna_slider_,
++           &QSlider::valueChanged,
++           this,
++           [this] (int step)
++           {
++             lna_value_->setText (
++               QString::number (step * 8)
++               + tr (" dB"));
++           });
+ 
+-  auto update_vga = [this] (int step)
+-  {
+-    vga_value_->setText (QString::number (step * 2) + tr (" dB"));
+-  };
++  connect (vga_slider_,
++           &QSlider::valueChanged,
++           this,
++           [this] (int step)
++           {
++             vga_value_->setText (
++               QString::number (step * 2)
++               + tr (" dB"));
++           });
++
++  connect (tx_vga_slider_,
++           &QSlider::valueChanged,
++           this,
++           [this] (int value)
++           {
++             tx_vga_value_->setText (
++               QString::number (value)
++               + tr (" dB"));
++           });
+ 
+-  auto update_tx_vga = [this] (int value)
+-  {
+-    tx_vga_value_->setText (QString::number (value) + tr (" dB"));
+-  };
+ 
+-  connect (lna_slider_, &QSlider::valueChanged,
+-           this, update_lna);
++  //
++  // Commands are sent only after the user releases a slider.
++  //
++  connect (lna_slider_,
++           &QSlider::sliderReleased,
++           this,
++           [this] {setLna ();});
+ 
+-  connect (vga_slider_, &QSlider::valueChanged,
+-           this, update_vga);
++  connect (vga_slider_,
++           &QSlider::sliderReleased,
++           this,
++           [this] {setVga ();});
+ 
+-  connect (tx_vga_slider_, &QSlider::valueChanged,
+-           this, update_tx_vga);
++  connect (tx_vga_slider_,
++           &QSlider::sliderReleased,
++           this,
++           [this] {setTxVga ();});
++
++  connect (amp_check_,
++           &QCheckBox::clicked,
++           this,
++           [this] {setAmp ();});
++
++
++  //
++  // Periodic bridge state refresh.
++  //
++  refresh_timer_->setInterval (1600);
++
++  connect (refresh_timer_,
++           &QTimer::timeout,
++           this,
++           [this] {refreshStatus ();});
++
++  refresh_timer_->start ();
+ 
+-  update_lna (lna_slider_->value ());
+-  update_vga (vga_slider_->value ());
+-  update_tx_vga (tx_vga_slider_->value ());
+ 
+   //
+   // Main layout
+   //
+-  auto * main_layout = new QVBoxLayout {this};
++  auto * main_layout =
++    new QVBoxLayout {this};
+ 
+   main_layout->addWidget (rx_group);
+   main_layout->addWidget (tx_group);
+   main_layout->addWidget (diag_group);
++
++  main_layout->addWidget (frequency_label_);
++  main_layout->addWidget (bridge_status_label_);
++
+   main_layout->addWidget (buttons);
+ 
+   setLayout (main_layout);
++
++
++  setConnected (false);
++
++  QTimer::singleShot (
++    0,
++    this,
++    [this] {refreshStatus ();});
++}
++
++
++QString HackRFGainDialog::catCommand (
++  QString const& command,
++  bool * ok)
++{
++  if (ok)
++    {
++      *ok = false;
++    }
++
++  QTcpSocket socket;
++
++  socket.connectToHost (
++    QStringLiteral ("127.0.0.1"),
++    hackrf_cat_port);
++
++  if (!socket.waitForConnected (
++        cat_connect_timeout_ms))
++    {
++      return socket.errorString ();
++    }
++
++  QByteArray request =
++    command.toLatin1 ();
++
++  request.append ('\n');
++
++  if (socket.write (request) < 0)
++    {
++      return socket.errorString ();
++    }
++
++  if (!socket.waitForBytesWritten (
++        cat_connect_timeout_ms))
++    {
++      return socket.errorString ();
++    }
++
++  QByteArray response;
++
++  QElapsedTimer elapsed;
++  elapsed.start ();
++
++  while (!response.contains ('\n')
++         && response.size () < 4096
++         && elapsed.elapsed ()
++              < cat_read_timeout_ms)
++    {
++      response.append (socket.readAll ());
++
++      if (response.contains ('\n'))
++        {
++          break;
++        }
++
++      int const remaining =
++        cat_read_timeout_ms
++        - static_cast<int> (elapsed.elapsed ());
++
++      if (remaining <= 0)
++        {
++          break;
++        }
++
++      if (!socket.waitForReadyRead (remaining))
++        {
++          break;
++        }
++    }
++
++  response.append (socket.readAll ());
++
++  QString const result =
++    QString::fromUtf8 (response)
++      .trimmed ()
++      .section ('\n', 0, 0)
++      .trimmed ();
++
++  if (result.isEmpty ())
++    {
++      return tr ("CAT: no response");
++    }
++
++  if (ok)
++    {
++      *ok = true;
++    }
++
++  return result;
++}
++
++
++void HackRFGainDialog::setConnected (
++  bool connected)
++{
++  connected_ = connected;
++
++  lna_slider_->setEnabled (connected);
++  vga_slider_->setEnabled (connected);
++  tx_vga_slider_->setEnabled (connected);
++
++  if (!connected)
++    {
++      amp_check_->setEnabled (false);
++    }
++}
++
++
++void HackRFGainDialog::setStatusError (
++  QString const& text)
++{
++  setConnected (false);
++
++  bridge_status_label_->setText (
++    tr ("CAT unavailable: %1").arg (text));
++
++  diagnostics_->setPlainText (
++    tr ("HackRF bridge CAT connection unavailable.\n"
++        "Address: 127.0.0.1:4532\n\n"
++        "%1")
++      .arg (text));
++}
++
++
++void HackRFGainDialog::saveGain (
++  QString const& key,
++  QVariant const& value)
++{
++  if (!settings_)
++    {
++      return;
++    }
++
++  settings_->setValue (
++    QStringLiteral ("HackRF/") + key,
++    value);
++
++  settings_->sync ();
++}
++
++
++void HackRFGainDialog::restoreSavedGains (
++  int lna,
++  int vga,
++  bool amp,
++  int tx_vga)
++{
++  if (!settings_ || gains_restored_)
++    {
++      return;
++    }
++
++  bool const have_saved =
++    settings_->contains (
++      QStringLiteral ("HackRF/LNA"))
++    || settings_->contains (
++      QStringLiteral ("HackRF/VGA"))
++    || settings_->contains (
++      QStringLiteral ("HackRF/AMP"))
++    || settings_->contains (
++      QStringLiteral ("HackRF/TXVGA"));
++
++  //
++  // Primera ejecución:
++  // adoptar como configuración persistente el estado actual del bridge.
++  //
++  if (!have_saved)
++    {
++      saveGain (
++        QStringLiteral ("LNA"), lna);
++
++      saveGain (
++        QStringLiteral ("VGA"), vga);
++
++      saveGain (
++        QStringLiteral ("AMP"), amp);
++
++      saveGain (
++        QStringLiteral ("TXVGA"), tx_vga);
++
++      gains_restored_ = true;
++      return;
++    }
++
++  int const saved_lna =
++    settings_->value (
++      QStringLiteral ("HackRF/LNA"),
++      lna).toInt ();
++
++  int const saved_vga =
++    settings_->value (
++      QStringLiteral ("HackRF/VGA"),
++      vga).toInt ();
++
++  bool const saved_amp =
++    settings_->value (
++      QStringLiteral ("HackRF/AMP"),
++      amp).toBool ();
++
++  int const saved_tx_vga =
++    settings_->value (
++      QStringLiteral ("HackRF/TXVGA"),
++      tx_vga).toInt ();
++
++  bool ok {false};
++
++  if (saved_lna >= 0
++      && saved_lna <= 40
++      && (saved_lna % 8) == 0)
++    {
++      catCommand (
++        QStringLiteral ("\\set_lna %1")
++          .arg (saved_lna),
++        &ok);
++    }
++
++  if (saved_vga >= 0
++      && saved_vga <= 62
++      && (saved_vga % 2) == 0)
++    {
++      catCommand (
++        QStringLiteral ("\\set_vga %1")
++          .arg (saved_vga),
++        &ok);
++    }
++
++  catCommand (
++    QStringLiteral ("\\set_amp %1")
++      .arg (saved_amp ? 1 : 0),
++    &ok);
++
++  if (saved_tx_vga >= 0
++      && saved_tx_vga <= 47)
++    {
++      catCommand (
++        QStringLiteral ("\\set_tx_vga %1")
++          .arg (saved_tx_vga),
++        &ok);
++    }
++
++  gains_restored_ = true;
++
++  QTimer::singleShot (
++    100,
++    this,
++    [this] {refreshStatus ();});
++}
++
++
++void HackRFGainDialog::refreshStatus ()
++{
++  bool ok {false};
++
++  QString const raw =
++    catCommand (
++      QStringLiteral ("\\status"),
++      &ok);
++
++  if (!ok)
++    {
++      setStatusError (raw);
++      return;
++    }
++
++  auto const fields =
++    parseStatus (raw);
++
++  QString const rf_tx =
++    fields.value (
++      QStringLiteral ("rf_tx"));
++
++  if (rf_tx != QStringLiteral ("DISABLED")
++      && rf_tx != QStringLiteral ("ARMED")
++      && rf_tx != QStringLiteral ("ACTIVE"))
++    {
++      setStatusError (
++        tr ("Unknown RF state: %1")
++          .arg (rf_tx));
++
++      return;
++    }
++
++
++  updating_ui_ = true;
++  setConnected (true);
++
++
++  bool const in_tx =
++    fields.value (
++      QStringLiteral ("ptt_sim"))
++      == QStringLiteral ("1");
++
++
++  //
++  // LNA - use staged value as the requested setting.
++  //
++  bool lna_ok {false};
++
++  int const lna =
++    fields.value (
++      QStringLiteral ("lna_stage"),
++      fields.value (QStringLiteral ("lna")))
++      .toInt (&lna_ok);
++
++  if (lna_ok
++      && lna >= 0
++      && lna <= 40
++      && (lna % 8) == 0)
++    {
++      if (!lna_slider_->isSliderDown ())
++        {
++          QSignalBlocker blocker {lna_slider_};
++
++          lna_slider_->setValue (
++            lna / 8);
++        }
++
++      bool const pending =
++        in_tx
++        && fields.value (
++             QStringLiteral ("lna"))
++           != QString::number (lna);
++
++      lna_value_->setText (
++        QString::number (lna)
++        + tr (" dB")
++        + (pending
++           ? tr (" (pending)")
++           : QString {}));
++    }
++
++
++  //
++  // RX VGA - same staged behaviour.
++  //
++  bool vga_ok {false};
++
++  int const vga =
++    fields.value (
++      QStringLiteral ("vga_stage"),
++      fields.value (QStringLiteral ("vga")))
++      .toInt (&vga_ok);
++
++  if (vga_ok
++      && vga >= 0
++      && vga <= 62
++      && (vga % 2) == 0)
++    {
++      if (!vga_slider_->isSliderDown ())
++        {
++          QSignalBlocker blocker {vga_slider_};
++
++          vga_slider_->setValue (
++            vga / 2);
++        }
++
++      bool const pending =
++        in_tx
++        && fields.value (
++             QStringLiteral ("vga"))
++           != QString::number (vga);
++
++      vga_value_->setText (
++        QString::number (vga)
++        + tr (" dB")
++        + (pending
++           ? tr (" (pending)")
++           : QString {}));
++    }
++
++
++  //
++  // AMP cannot be changed while TX is active.
++  //
++  bool amp_ok {false};
++
++  int const amp =
++    fields.value (
++      QStringLiteral ("amp"))
++      .toInt (&amp_ok);
++
++  if (amp_ok
++      && (amp == 0 || amp == 1))
++    {
++      QSignalBlocker blocker {amp_check_};
++
++      amp_check_->setChecked (
++        amp != 0);
++    }
++
++  amp_check_->setEnabled (
++    connected_
++    && amp_ok
++    && !in_tx);
++
++
++  //
++  // TX VGA staged value.
++  //
++  bool tx_vga_ok {false};
++
++  int const tx_vga =
++    fields.value (
++      QStringLiteral ("tx_vga_stage"))
++      .toInt (&tx_vga_ok);
++
++  if (tx_vga_ok
++      && tx_vga >= 0
++      && tx_vga <= 47)
++    {
++      if (!tx_vga_slider_->isSliderDown ())
++        {
++          QSignalBlocker blocker {
++            tx_vga_slider_};
++
++          tx_vga_slider_->setValue (
++            tx_vga);
++        }
++
++      tx_vga_value_->setText (
++        QString::number (tx_vga)
++        + tr (" dB"));
++    }
++
++
++  //
++  // Restaurar la configuración persistente únicamente en RX.
++  // AMP no puede modificarse durante TX en HackRF.
++  //
++  if (!in_tx
++      && !gains_restored_
++      && lna_ok
++      && vga_ok
++      && amp_ok
++      && tx_vga_ok)
++    {
++      restoreSavedGains (
++        lna,
++        vga,
++        amp != 0,
++        tx_vga);
++
++      updating_ui_ = false;
++      return;
++    }
++
++
++  frequency_label_->setText (
++    tr ("CAT frequency: %1 Hz")
++      .arg (
++        fields.value (
++          QStringLiteral ("dial"),
++          QStringLiteral ("—"))));
++
++
++  bridge_status_label_->setText (
++    tr ("CAT connected · %1 · TX: %2 · "
++        "TX VGA applied: %3 dB")
++      .arg (
++        fields.value (
++          QStringLiteral ("state"),
++          QStringLiteral ("?")),
++        in_tx
++          ? tr ("ON")
++          : tr ("OFF"),
++        fields.value (
++          QStringLiteral ("tx_vga_applied"),
++          QStringLiteral ("—"))));
++
++
++  diagnostics_->setPlainText (
++    tr ("CAT bridge: connected\n"
++        "Address: 127.0.0.1:4532\n"
++        "RF TX state: %1\n\n"
++        "Raw bridge status:\n%2\n\n"
++        "USB block diagnostics will be added "
++        "from the HackRF bridge log in the "
++        "next integration step.")
++      .arg (rf_tx, raw));
++
++
++  updating_ui_ = false;
++}
++
++
++void HackRFGainDialog::setLna ()
++{
++  if (!connected_ || updating_ui_)
++    {
++      return;
++    }
++
++  int const value =
++    lna_slider_->value () * 8;
++
++  bool ok {false};
++
++  QString const result =
++    catCommand (
++      QStringLiteral ("\\set_lna %1")
++        .arg (value),
++      &ok);
++
++  if (!ok
++      || result != QStringLiteral ("RPRT 0"))
++    {
++      bridge_status_label_->setText (
++        tr ("Error setting RX LNA: %1")
++          .arg (result));
++    }
++  else
++    {
++      saveGain (
++        QStringLiteral ("LNA"),
++        value);
++    }
++
++  QTimer::singleShot (
++    80,
++    this,
++    [this] {refreshStatus ();});
++}
++
++
++void HackRFGainDialog::setVga ()
++{
++  if (!connected_ || updating_ui_)
++    {
++      return;
++    }
++
++  int const value =
++    vga_slider_->value () * 2;
++
++  bool ok {false};
++
++  QString const result =
++    catCommand (
++      QStringLiteral ("\\set_vga %1")
++        .arg (value),
++      &ok);
++
++  if (!ok
++      || result != QStringLiteral ("RPRT 0"))
++    {
++      bridge_status_label_->setText (
++        tr ("Error setting RX VGA: %1")
++          .arg (result));
++    }
++  else
++    {
++      saveGain (
++        QStringLiteral ("VGA"),
++        value);
++    }
++
++  QTimer::singleShot (
++    80,
++    this,
++    [this] {refreshStatus ();});
++}
++
++
++void HackRFGainDialog::setAmp ()
++{
++  if (!connected_
++      || updating_ui_
++      || !amp_check_->isEnabled ())
++    {
++      return;
++    }
++
++  int const value =
++    amp_check_->isChecked () ? 1 : 0;
++
++  bool ok {false};
++
++  QString const result =
++    catCommand (
++      QStringLiteral ("\\set_amp %1")
++        .arg (value),
++      &ok);
++
++  if (!ok
++      || result != QStringLiteral ("RPRT 0"))
++    {
++      bridge_status_label_->setText (
++        tr ("Error setting RX AMP: %1")
++          .arg (result));
++    }
++  else
++    {
++      saveGain (
++        QStringLiteral ("AMP"),
++        value != 0);
++    }
++
++  QTimer::singleShot (
++    80,
++    this,
++    [this] {refreshStatus ();});
++}
++
++
++void HackRFGainDialog::setTxVga ()
++{
++  if (!connected_ || updating_ui_)
++    {
++      return;
++    }
++
++  int const value =
++    tx_vga_slider_->value ();
++
++  bool ok {false};
++
++  QString const result =
++    catCommand (
++      QStringLiteral ("\\set_tx_vga %1")
++        .arg (value),
++      &ok);
++
++  if (!ok
++      || result != QStringLiteral ("RPRT 0"))
++    {
++      bridge_status_label_->setText (
++        tr ("Error setting TX VGA: %1")
++          .arg (result));
++    }
++  else
++    {
++      saveGain (
++        QStringLiteral ("TXVGA"),
++        value);
++    }
++
++  QTimer::singleShot (
++    80,
++    this,
++    [this] {refreshStatus ();});
+ }
+diff --git a/HackRFGainDialog.hpp b/HackRFGainDialog.hpp
+index 79c01ff38..150ee5d37 100644
+--- a/HackRFGainDialog.hpp
++++ b/HackRFGainDialog.hpp
+@@ -2,18 +2,48 @@
+ #define HACKRF_GAIN_DIALOG_HPP
+ 
+ #include <QDialog>
++#include <QString>
+ 
+ class QLabel;
+ class QSlider;
+ class QCheckBox;
+ class QPlainTextEdit;
++class QTimer;
++class QSettings;
+ 
+ class HackRFGainDialog final : public QDialog
+ {
+ public:
+-  explicit HackRFGainDialog (QWidget * parent = nullptr);
++  explicit HackRFGainDialog (
++    QSettings * settings,
++    QWidget * parent = nullptr);
+ 
+ private:
++  QString catCommand (
++    QString const& command,
++    bool * ok = nullptr);
++
++  void refreshStatus ();
++  void setConnected (bool connected);
++  void setStatusError (QString const& text);
++
++  void restoreSavedGains (
++    int lna,
++    int vga,
++    bool amp,
++    int tx_vga);
++
++  void saveGain (
++    QString const& key,
++    QVariant const& value);
++
++  void setLna ();
++  void setVga ();
++  void setAmp ();
++  void setTxVga ();
++
++  QSettings * settings_;
++
+   QSlider * lna_slider_;
+   QSlider * vga_slider_;
+   QCheckBox * amp_check_;
+@@ -23,7 +53,16 @@ private:
+   QLabel * vga_value_;
+   QLabel * tx_vga_value_;
+ 
++  QLabel * frequency_label_;
++  QLabel * bridge_status_label_;
++
+   QPlainTextEdit * diagnostics_;
++
++  QTimer * refresh_timer_;
++
++  bool connected_ {false};
++  bool updating_ui_ {false};
++  bool gains_restored_ {false};
+ };
+ 
+ #endif
+-- 
+2.34.1
+

@@ -1,0 +1,59 @@
+From 7609910527961f15c1614fe0e3fbd7790afba316 Mon Sep 17 00:00:00 2001
+From: Ricardo Jose <ricardo@localhost>
+Date: Mon, 16 Nov 2026 18:20:07 +0000
+Subject: [PATCH 1/8] ui: add HackRF controls entry to radio settings
+
+---
+ Configuration.cpp |  7 +++++++
+ Configuration.ui  | 10 ++++++++++
+ 2 files changed, 17 insertions(+)
+
+diff --git a/Configuration.cpp b/Configuration.cpp
+index bf598688f..051caaa3f 100644
+--- a/Configuration.cpp
++++ b/Configuration.cpp
+@@ -622,6 +622,7 @@ private:
+   Q_SLOT void on_CALL3_EME_download_button_clicked (bool);
+   Q_SLOT void on_LotW_CSV_fetch_push_button_clicked (bool);
+   Q_SLOT void on_hamlib_download_button_clicked (bool);
++  Q_SLOT void on_hackrf_controls_button_clicked (bool);
+   Q_SLOT void on_revert_update_button_clicked (bool);
+   Q_SLOT void on_gbSpecialOpActivity_clicked (bool);
+   Q_SLOT void on_rbFox_clicked (bool);
+@@ -3855,6 +3856,12 @@ void Configuration::impl::on_decoded_text_font_push_button_clicked ()
+                                                   );
+ }
+ 
++void Configuration::impl::on_hackrf_controls_button_clicked (bool /*clicked*/)
++{
++  MessageBox::information_message (
++    this, tr ("HackRF Controls"), tr ("HackRF control interface test."));
++}
++
+ void Configuration::impl::on_hamlib_download_button_clicked (bool /*clicked*/)
+ {
+ #ifdef WIN32
+diff --git a/Configuration.ui b/Configuration.ui
+index d7b9c0a1e..498c4d04d 100644
+--- a/Configuration.ui
++++ b/Configuration.ui
+@@ -1533,6 +1533,16 @@ other hardware interface for PTT.</string>
+             </item>
+            </layout>
+           </item>
++          <item row="2" column="0" colspan="4">
++           <widget class="QPushButton" name="hackrf_controls_button">
++            <property name="toolTip">
++             <string>Open HackRF receiver and transmitter controls.</string>
++            </property>
++            <property name="text">
++             <string>HackRF Controls...</string>
++            </property>
++           </widget>
++          </item>
+           <item row="0" column="0">
+            <widget class="QRadioButton" name="rbHamlib64">
+             <property name="text">
+-- 
+2.34.1
+
